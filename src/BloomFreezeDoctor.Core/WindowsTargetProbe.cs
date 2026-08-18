@@ -1,0 +1,243 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace BloomFreezeDoctor;
+
+/// <summary>
+/// Reads one observation of a real process. Split behind an interface so the watcher and detector can
+/// be tested without a Bloom, and so the awkward Win32 details live in exactly one place.
+/// </summary>
+public interface ITargetProbe
+{
+    /// <summary>Takes a reading. Must never throw, and must never block for long.</summary>
+    TargetObservation Observe(TimeSpan uptime);
+}
+
+/// <summary>
+/// The real probe: asks Windows about a Bloom process without perturbing it. Everything here is
+/// read-only, needs no special privilege for a process of our own user, and cannot leave the target in
+/// a worse state than it found it — a property worth preserving deliberately, since the spike proved
+/// how badly a suspending diagnostic can end (see docs/SPIKE-FINDINGS.md §6).
+/// </summary>
+public sealed class WindowsTargetProbe : ITargetProbe
+{
+    private readonly Process _process;
+
+    /// <summary>
+    /// Sticky, per the spike: a dead process cannot be asked whether it was debugged, and stopping the
+    /// debugger is the most common thing a developer does all day. Once true, always true.
+    /// </summary>
+    private bool _everDebugged;
+
+    /// <summary>Creates a probe for an already-opened process handle.</summary>
+    public WindowsTargetProbe(Process process)
+    {
+        _process = process;
+    }
+
+    /// <summary>True if a debugger has ever been seen attached to this process.</summary>
+    public bool EverDebugged => _everDebugged;
+
+    /// <summary>
+    /// The window we consider Bloom's main window: visible, top-level, owned by this process, and the
+    /// largest such — chosen explicitly rather than trusting <c>Process.MainWindowHandle</c>, which
+    /// picks the first visible top-level window it happens to find. A healthy Bloom keeps a second,
+    /// invisible top-level window all session (its splash screen is hidden rather than closed), so
+    /// relying on .NET's choice is an ordering accident waiting to matter.
+    /// </summary>
+    public IntPtr FindMainWindow()
+    {
+        var best = IntPtr.Zero;
+        var bestArea = -1L;
+        foreach (var window in EnumerateTopLevelWindows(_process.Id))
+        {
+            if (!IsWindowVisible(window))
+                continue;
+            if (!GetWindowRect(window, out var rect))
+                continue;
+            var area = (long)Math.Max(0, rect.Right - rect.Left) * Math.Max(0, rect.Bottom - rect.Top);
+            if (area <= bestArea)
+                continue;
+            bestArea = area;
+            best = window;
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// Counts this process's visible top-level windows. "Visible" is the operative word: see
+    /// <see cref="FindMainWindow"/>.
+    /// </summary>
+    public int CountVisibleWindows() =>
+        EnumerateTopLevelWindows(_process.Id).Count(IsWindowVisible);
+
+    /// <inheritdoc />
+    public TargetObservation Observe(TimeSpan uptime)
+    {
+        var alive = IsStillAlive();
+        if (!alive)
+            return new TargetObservation
+            {
+                Uptime = uptime,
+                IsAlive = false,
+                WindowResponds = false,
+                HasVisibleWindow = false,
+                DebuggerAttached = _everDebugged,
+            };
+
+        SampleDebugger();
+
+        var window = FindMainWindow();
+        var responds = window != IntPtr.Zero && WindowAnswers(window);
+
+        return new TargetObservation
+        {
+            Uptime = uptime,
+            IsAlive = true,
+            WindowResponds = responds,
+            HasVisibleWindow = window != IntPtr.Zero,
+            DebuggerAttached = _everDebugged,
+        };
+    }
+
+    /// <summary>
+    /// Asks the window to acknowledge a do-nothing message. This is the signal the spike settled on:
+    /// <c>IsHungAppWindow</c> needs about five seconds to make up its mind, whereas this reacts at
+    /// once. Neither can see a UI thread blocked in an STA managed wait — that needs Bloom's heartbeat.
+    /// </summary>
+    private static bool WindowAnswers(IntPtr window) =>
+        SendMessageTimeout(window, WM_NULL, IntPtr.Zero, IntPtr.Zero, SMTO_ABORTIFHUNG, ProbeTimeoutMs, out _)
+        != IntPtr.Zero;
+
+    /// <summary>
+    /// Corroborating signal, kept for the report rather than for the decision: Windows' own opinion
+    /// that the window has stopped pumping.
+    /// </summary>
+    public bool WindowsThinksItIsHung()
+    {
+        var window = FindMainWindow();
+        return window != IntPtr.Zero && IsHungAppWindow(window);
+    }
+
+    private void SampleDebugger()
+    {
+        if (_everDebugged)
+            return;
+        try
+        {
+            var present = false;
+            if (CheckRemoteDebuggerPresent(_process.Handle, ref present) && present)
+                _everDebugged = true;
+        }
+        catch (Exception)
+        {
+            // Losing this reading is survivable; the channel check is the stronger guard anyway.
+        }
+    }
+
+    private bool IsStillAlive()
+    {
+        try
+        {
+            return !_process.HasExited;
+        }
+        catch (Exception)
+        {
+            // We can lose the right to ask (a handle can be invalidated); treat that as gone rather
+            // than crashing the watcher.
+            return false;
+        }
+    }
+
+    private static IEnumerable<IntPtr> EnumerateTopLevelWindows(int processId)
+    {
+        var windows = new List<IntPtr>();
+        EnumWindows(
+            (window, _) =>
+            {
+                GetWindowThreadProcessId(window, out var owner);
+                if (owner == processId)
+                    windows.Add(window);
+                return true;
+            },
+            IntPtr.Zero
+        );
+        return windows;
+    }
+
+    /// <summary>Reads a window's title, for the report's window inventory.</summary>
+    public static string TitleOf(IntPtr window)
+    {
+        var text = new StringBuilder(512);
+        GetWindowText(window, text, text.Capacity);
+        return text.ToString();
+    }
+
+    /// <summary>Reads a window's class name, which is how a modal dialog gives itself away.</summary>
+    public static string ClassOf(IntPtr window)
+    {
+        var text = new StringBuilder(256);
+        GetClassName(window, text, text.Capacity);
+        return text.ToString();
+    }
+
+    #region interop
+
+    /// <summary>
+    /// Short on purpose. This runs on the watcher's cadence, and a probe that blocks for seconds
+    /// would make the Doctor look as stuck as the thing it is watching.
+    /// </summary>
+    private const uint ProbeTimeoutMs = 1000;
+
+    private const uint WM_NULL = 0x0000;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    private delegate bool EnumWindowsProc(IntPtr window, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out int processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsHungAppWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr window, out RECT rect);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, StringBuilder text, int count);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(
+        IntPtr window,
+        uint message,
+        IntPtr wParam,
+        IntPtr lParam,
+        uint flags,
+        uint timeoutMs,
+        out IntPtr result
+    );
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CheckRemoteDebuggerPresent(IntPtr process, ref bool present);
+
+    #endregion
+}

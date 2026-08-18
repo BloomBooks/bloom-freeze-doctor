@@ -117,6 +117,27 @@ machine, with 12 passing tests in `tests/BloomFreezeDoctor.Core.Tests`. It is de
 process or window API so it can be tested without a frozen Bloom, and every non-obvious rule cites the
 spike finding behind it. Thresholds live in `DetectorThresholds` (decision D3's numbers).
 
-**Next:** the parts that talk to the real world — a `BloomTargetWatcher` that produces
-`TargetObservation`s from a live process (window probe, visible-window count, sticky debugger flag,
-log/port discovery), then the gatherer and the report bundle, then the outbox, then the window.
+## 2026-08-18 — Phase 1: the real-world layer works end to end
+
+`BloomFreezeDoctor.Core` now watches an actual process. **38 tests passing**, and verified against the
+stub: `Healthy → Suspect → Frozen`, reporting exactly once, with `IsHungAppWindow` agreeing as
+corroboration and `mayFile=True` for a target that looks like a real installed Bloom.
+
+- **`BloomChannel`** — channel from the exe path, plus headless/automation recognition. Both are pure
+  string functions with tests naming the trap each avoids (the `Bloom.exe`-vs-`Bloom.dll` difference
+  from Bloom's own code, and matching console verbs as whole arguments so a collection folder called
+  `upload` does not silence a user's reports).
+- **`BloomLogLocator`** — identifies a process's log by its `App Launched with [exe]` line. A test
+  reproduces the real arrangement measured in the spike, where the newest log belonged to a Bloom in a
+  different worktree.
+- **`WindowsTargetProbe`** — one read-only observation. Picks the main window explicitly (visible,
+  top-level, largest) rather than trusting `Process.MainWindowHandle`, for the splash-screen reason.
+- **`BloomTargetWatcher`** — background timer, never a UI thread; decides in one place whether a report
+  may be filed (no debugger, ever; no developer or automation runs). Probe failures are swallowed
+  deliberately: a watcher that throws stops watching.
+
+**Next, in order:** the exit classifier (the Phase 1 half of D4 — Event Log, WER, exit code — which the
+detector deliberately refuses to guess at); then the gatherer (`WriteDump` plus the OS-level evidence
+from the spike's Probe, which should be ported into Core rather than left in `spike/`); then the report
+bundle and outbox (§5.1); then the status window (§2.1). After that, the Bloom-side changes on
+`BL-16719-Freeze-Doctor` in BloomDesktop, heartbeat first.
