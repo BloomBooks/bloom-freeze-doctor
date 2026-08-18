@@ -1,7 +1,14 @@
 # Bloom Freeze Doctor — Plan (BL-16719)
 
-Status: **draft for John's review.** Revision 2, after a review by Fable whose corrections are
-folded in (its findings are noted inline as `[rev2]` where they changed the design).
+Status: **live working document**, revision 6. It is written to the Bloom team rather than to the
+public, so it addresses the reader directly and records arguments as well as conclusions — that history
+is the useful part, and it is kept deliberately. Revision markers (`[rev2]` … `[rev6]`) mark what
+changed and why: rev 2 folded in a review by Fable, rev 3–5 the decisions in §10 as they were settled,
+and rev 6 the first Phase 0 spike findings (see `docs/SPIKE-FINDINGS.md`, which supersedes this
+document wherever the two disagree, because it was measured).
+
+All nine decisions in §10 are settled. What remains open is one *mechanism* — how we sign (D7) — and
+the spike work itemized at the end of the findings document.
 
 ## 1. The problem, and the three states we must diagnose
 
@@ -542,7 +549,18 @@ worth.
 
 Ranked by what each buys against what it risks:
 
-1. **The session file. Do this one first.** At startup, write one small JSON: pid, version, channel,
+1. **The UI-thread heartbeat. First, and the spike is why** `[rev6]`. A 500 ms WinForms timer bumping
+   a counter, plus a background thread publishing it through the memory-mapped file (cheaper and less
+   racy here than rewriting a file twice a second). ~40 lines.
+   *What it buys:* the only detector we have for a freeze in an STA managed wait. The spike measured
+   Tier A as **totally blind** to that case — `IsHungAppWindow` False, `Process.Responding` True,
+   `SendMessageTimeout` answering in 0 ms, while the UI thread sat in `Monitor.Wait` — and the cause is
+   inherent to how `CoWaitForMultipleHandles` pumps sent messages, so there is no cleverer outside
+   probe to find. Bloom's UI thread awaits WebView2 constantly, so this is likely a *common* Bloom
+   freeze shape rather than an exotic one. A 6.4 without this cannot see that whole family of freezes.
+   *Ship it together with item 2*, since a heartbeat-detected freeze still needs the log path to
+   produce a useful report.
+2. **The session file.** At startup, write one small JSON: pid, version, channel,
    exe path, command line, start time, http/ws/cdp ports, collection name, and — the point of the
    exercise — **`Logger.LogPath`**. Write-once, on a background thread a moment after startup, wrapped
    in a catch-everything.
@@ -551,24 +569,20 @@ Ranked by what each buys against what it risks:
    restart-after-freeze case) becomes a lookup; the 9222-versus-`httpPort+2` guessing goes away; and so
    does reading the CDP port out of the WebView2 child's command line because http.sys hides Bloom's
    own port. Perhaps 30 lines, and it removes several Phase 0 unknowns.
-2. **The clean-exit proof.** One `AppDomain.CurrentDomain.ProcessExit` handler writing a tiny record —
+3. **The clean-exit proof.** One `AppDomain.CurrentDomain.ProcessExit` handler writing a tiny record —
    §3.5 in about ten lines. *What it buys:* state 2 stops being exit-code archaeology and becomes
    positive proof, on the installed base. *The one caveat:* this is the only item that touches
    shutdown, and Bloom's shutdown has form (`ProgramExit` force-quits after 20 s). It is the same class
    of work Bloom already does there — the end of `Main` rewrites the whole log file — but it must be a
    sub-kilobyte write that cannot block and cannot throw.
-3. **The UI-thread heartbeat.** A 500 ms WinForms timer bumping a counter, plus a background thread
-   publishing it through the memory-mapped file (cheaper and less racy here than rewriting a file
-   twice a second). ~40 lines. *What it buys:* the §3.1 signal-2 detector — the one that catches
-   freezes in STA managed waits, which `IsHungAppWindow` reports as healthy and which we suspect is
-   the *common* case for Bloom. High value; slightly more code than 1 and 2, and the reason it is third
-   rather than second.
 4. **The in-flight API table.** The highest-value item diagnostically — it may simply *answer*
    BL-16697 with "POST /bloom/api/publish/… started 47 s ago and never returned" — but the only one
    that touches a hot path, `BloomApiHandler.ProcessRequestAsync`, which every request goes through. It
    can be made genuinely safe (a couple of array writes into a fixed-size slot indexed by thread, no
    locks, no allocation, nothing that can throw), but "safe if written carefully" is a different claim
    from items 1–3. Patch it only after those have proved themselves, and only with dogfooding first.
+   Note it remains the best item *diagnostically* — the reordering above is about what is
+   **detectable**, not about what explains a freeze once detected.
 5. **The "already reported" marker.** Three lines where `ProblemReportApi` succeeds. Retires §5.2's
    log-scraping hold-off hack. Trivial, do it while we are in there.
 
