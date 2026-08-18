@@ -1,0 +1,13 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# The stub is driven by a command file written next to its exe; it is transient by design.
+freezestub-command.txt
+
+# Spike dumps and gathered reports never belong in the repo: they contain process memory.
+*.dmp
+reports/
+outbox/

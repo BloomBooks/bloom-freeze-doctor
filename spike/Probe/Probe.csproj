@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Phase 0 spike probe: a throwaway console tool that answers the plan's open technical
+    questions against a real process. Every answer it prints is something the plan currently
+    only assumes, so this is deliberately verbose about HOW it got each result.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>Probe</AssemblyName>
+    <RootNamespace>Probe</RootNamespace>
+    <!-- Diagnostics packages pull in a lot; we only ever run this locally. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Managed stack walking, live-attach and dump reading (plan section 4.1). -->
+    <PackageReference Include="Microsoft.Diagnostics.Runtime" Version="3.1.512801" />
+    <!-- DiagnosticsClient.WriteDump: the runtime's own createdump over the IPC pipe. -->
+    <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.510501" />
+    <!-- Reading another process's command line (WebView2's remote debugging port), section 4.3. -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
