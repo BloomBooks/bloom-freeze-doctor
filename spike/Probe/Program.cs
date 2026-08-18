@@ -57,9 +57,53 @@ internal static class Program
         if (args.Contains("--dump"))
             ReportDumpAndReadItBack(pid);
         if (args.Contains("--attach"))
-            ReportLiveAttach(pid);
+        {
+            // --hold N keeps the suspension open for N seconds so an experimenter can kill THIS
+            // process mid-attach and find out whether the target ever resumes. That is the safety
+            // question in plan section 4.1, and the answer decides whether the fallback path needs
+            // a resume guarantee.
+            var hold = 0;
+            var holdArg = args.FirstOrDefault(a => a.StartsWith("--hold=", StringComparison.Ordinal));
+            if (holdArg != null)
+                int.TryParse(holdArg.Substring("--hold=".Length), out hold);
+            ReportLiveAttach(pid, hold);
+        }
+
+        // The zero-risk alternative: attach without suspending. Nothing we can die holding, so it
+        // can never leave the target stopped. The question is whether the stacks it reads are
+        // usable, since the target keeps running underneath us.
+        if (args.Contains("--attach-nosuspend"))
+            ReportNoSuspendAttach(pid);
 
         return 0;
+    }
+
+    private static void ReportNoSuspendAttach(int pid)
+    {
+        Console.WriteLine("--- ClrMD live attach WITHOUT suspend (cannot strand the target) ---");
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using var target = DataTarget.AttachToProcess(pid, suspend: false);
+            var version = target.ClrVersions.FirstOrDefault();
+            if (version == null)
+            {
+                Console.WriteLine("  no CLR found");
+                return;
+            }
+            using var runtime = version.CreateRuntime();
+            var withStacks = runtime.Threads.Count(t => t.EnumerateStackTrace().Any());
+            sw.Stop();
+            Console.WriteLine(
+                $"  walked {runtime.Threads.Length} managed thread(s), {withStacks} with stacks, in {sw.ElapsedMilliseconds} ms"
+            );
+            PrintLikelyUiThread(runtime);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"  FAILED after {sw.ElapsedMilliseconds} ms: {e.GetType().Name}: {e.Message}");
+        }
+        Console.WriteLine();
     }
 
     #region responsiveness — plan section 3.1
@@ -536,7 +580,7 @@ internal static class Program
     /// threads, and the OS does NOT resume them if we die holding the attach. Run this ONLY
     /// against the stub.
     /// </summary>
-    private static void ReportLiveAttach(int pid)
+    private static void ReportLiveAttach(int pid, int holdSeconds)
     {
         Console.WriteLine("--- ClrMD live attach WITH SUSPEND (target is stopped while we read) ---");
         Console.WriteLine("    !!! never aim this at a Bloom someone is using !!!");
@@ -558,6 +602,17 @@ internal static class Program
                     + $"({threadsWithStacks} with stacks) in {sw.ElapsedMilliseconds} ms of suspension"
             );
             PrintLikelyUiThread(runtime);
+
+            if (holdSeconds > 0)
+            {
+                Console.WriteLine(
+                    $"  HOLDING the suspension for {holdSeconds}s — kill this process now to test"
+                );
+                Console.WriteLine($"  (this probe is pid {Environment.ProcessId})");
+                Console.Out.Flush();
+                Thread.Sleep(TimeSpan.FromSeconds(holdSeconds));
+                Console.WriteLine("  releasing normally");
+            }
         }
         catch (Exception e)
         {

@@ -17,17 +17,44 @@ internal static class Program
     /// <summary>Name of the file we watch for one-word commands. See <see cref="Apply"/>.</summary>
     internal const string CommandFileName = "freezestub-command.txt";
 
+    /// <summary>
+    /// Where we leave proof that shutdown ran (plan section 3.5). Its ABSENCE after the process is
+    /// gone is the signal that matters, so it is deleted at startup and only ever written on the way
+    /// out.
+    /// </summary>
+    internal const string ExitProofFileName = "freezestub-exit-proof.txt";
+
     private static Form _form = null!;
     private static string _commandPath = null!;
+    private static string _exitProofPath = null!;
+
+    /// <summary>
+    /// Counts how far shutdown got. The plan wants a phase counter rather than a boolean, so that a
+    /// process dying mid-shutdown still says where it stopped.
+    /// </summary>
+    private static int _shutdownPhase;
 
     [STAThread]
     private static int Main(string[] args)
     {
         _commandPath = Path.Combine(AppContext.BaseDirectory, CommandFileName);
-        // Start from a clean slate: a command left over from a previous run must not fire at startup.
+        _exitProofPath = Path.Combine(AppContext.BaseDirectory, ExitProofFileName);
+        // Start from a clean slate: a command left over from a previous run must not fire at startup,
+        // and last run's exit proof must not be mistaken for this run's.
         TryDelete(_commandPath);
+        TryDelete(_exitProofPath);
+
+        // This is the mechanism under test from plan section 3.5: prove a clean exit rather than
+        // infer a crash. ProcessExit runs for a normal return from Main and for Environment.Exit,
+        // and NOT for FailFast, TerminateProcess, or an access violation — exactly the line we want
+        // to draw. The spike measures whether that is really so.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => WriteExitProof("ProcessExit");
 
         ApplicationConfiguration.Initialize();
+
+        // Let an unhandled exception behave like a real crash instead of being swallowed into a
+        // WinForms error dialog, so the "throw" command tests what we mean it to.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
 
         _form = new Form
         {
@@ -56,7 +83,28 @@ internal static class Program
         timer.Start();
 
         Application.Run(_form);
+        _shutdownPhase = 1; // message loop returned
         return 0;
+    }
+
+    /// <summary>
+    /// Writes the clean-exit proof. Deliberately tiny and completely guarded: in Bloom this runs
+    /// inside ProcessExit's few-second budget during a shutdown that has historically been fragile,
+    /// so it must not be able to block or throw.
+    /// </summary>
+    private static void WriteExitProof(string source)
+    {
+        try
+        {
+            File.WriteAllText(
+                _exitProofPath,
+                $"source={source} shutdownPhase={_shutdownPhase} at={DateTime.UtcNow:O}"
+            );
+        }
+        catch (Exception)
+        {
+            // Losing the proof is survivable; delaying or breaking shutdown is not.
+        }
     }
 
     private static void PollForCommand(Label status)

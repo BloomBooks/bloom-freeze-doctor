@@ -270,16 +270,23 @@ offline with ClrMD — one artifact and one analysis pipeline serving both freez
 the size the card asks for. Whether its stacks are as complete as we need is the single most
 important thing the spike must settle.
 
-**Fallback, when that pipe does not answer: `MiniDumpWriteDump` + ClrMD live attach.** Two safety
-rules, both non-negotiable:
+**Both measured in the spike, and the fallback changed as a result** `[rev6]`. `WriteDump` produced a
+2.2 MB dump in ~0.5 s **even with the UI thread wedged**, and ClrMD walked every managed thread out of
+it, naming the blocking call. Meanwhile the suspending live attach that rev 2 planned as the fallback
+turned out to be indefensible:
 
-1. **Resume must be guaranteed.** ClrMD's `AttachToProcess(pid, suspend: true)` suspends threads, and
-   unlike a real debugger attach **the OS does not undo that if the reader dies** — a Doctor crash
-   mid-walk would leave Bloom suspended forever, turning a recoverable hang into a permanent one.
-   The suspend-and-walk therefore runs in a short-lived child process whose parent guarantees resume
-   (and the hang detector is muted during it, so it does not observe its own artifact).
-2. **Bounded.** A couple of seconds total, because at the 60 s threshold Tier A cannot rule out that
-   Bloom is legitimately mid-upload.
+- A probe hard-killed mid-attach left the target **alive and suspended at +1 s, +4 s, +10 s and +20 s**,
+  and a later clean attach-and-dispose did **not** revive it. There is no recovery short of killing
+  Bloom, so a Doctor crash during diagnosis would turn a recoverable hang into an unrecoverable one.
+- **So `suspend: true` is removed from the design entirely** — not guarded with a child process as rev 2
+  proposed. The general rule it leaves behind: *prefer mechanisms whose failure cannot leave the target
+  suspended.* `WriteDump` qualifies inherently, because the target's own runtime does the work; if we
+  die, it simply finishes or abandons on its own.
+
+**The fallback is therefore a non-suspending attach:** `AttachToProcess(pid, suspend: false)` walked
+all threads of a frozen stub in **197 ms**, correctly showing `Monitor.Wait`, and cannot strand
+anything. If neither mechanism works we report the OS-level evidence and say plainly that managed
+stacks were unavailable — a far better failure than a bricked Bloom.
 
 Managed stacks are resolved to **text on the user's machine** and that text is what we attach. This is
 deliberate: a stacks-only minidump generally cannot reproduce managed frames later without heap

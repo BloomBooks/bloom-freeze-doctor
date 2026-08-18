@@ -21,11 +21,9 @@ someone (or another Claude session, on another machine) to pick the work up cold
 
 ## Open questions for John
 
-1. **Where should this repo live, and when?** It is currently a local-only git repo at
-   `C:\github\bloom-freeze-doctor`, so nothing here can be picked up on another machine yet. The card
-   asks for a public `BloomBooks/bloom-freeze-doctor` (MIT, © SIL Global 2026). Creating a public repo
-   under the org is an outward-facing step, so it is waiting on your say-so — including whether to
-   start it **private** and flip it public at release.
+- Nothing blocking at the moment. Repo question resolved: it is public at
+  **https://github.com/BloomBooks/bloom-freeze-doctor**, with the README making the
+  very-early-work-in-progress state unmistakable.
 
 ---
 
@@ -63,6 +61,33 @@ mode per plan state) and `spike/Probe` (a console probe that answers §11's ques
 Finding 2 means a 6.4 without it cannot see a whole class of freezes, which changes the value ordering
 that list was built on.
 
-**Next:** finish the spike — the suspend-safety test (kill the probe mid-suspend and see whether the
-stub resumes), exit codes for each failure mode, state 3 detection and ending a zombie, log-to-pid
-mapping against the real Blooms, and a read-only pass over an installed Bloom rather than a dev build.
+## 2026-08-18 — Phase 0 spike, second pass; repo published
+
+**Repo is live and public:** https://github.com/BloomBooks/bloom-freeze-doctor (MIT, © SIL Global 2026).
+Checked the tree for secrets before pushing; the only hit was the phrase "no new secret handling" in
+prose. **Backport list reordered** so the heartbeat leads, per John.
+
+**Four more findings, one of which changed the design** (detail in `docs/SPIKE-FINDINGS.md` §6–10):
+
+- **The suspending ClrMD attach is out of the design.** Hard-killing the probe mid-attach left the stub
+  alive and suspended indefinitely (+20 s and counting), and a later clean attach did not revive it.
+  A Doctor crash during diagnosis would have turned a recoverable hang into an unrecoverable one. Rev 2
+  wanted to guard it with a child process; measurement says delete it instead — especially since
+  `WriteDump` already works on wedged processes and `suspend: false` walks all threads in ~200 ms
+  without being able to strand anything.
+- **The §3.5 clean-exit proof works exactly as designed.** `ProcessExit` fired for the orderly exit and
+  for nothing else: clean quit left proof (`shutdownPhase=1`); `FailFast` (`0x80131623`), an unhandled
+  exception (`0xE0434352`) and a hard kill (`-1`) all left none. The exit codes the plan guessed at were
+  right. State 3 also confirmed detectable: process alive, window handle gone.
+- **Log-to-pid mapping works, and the naive alternative is provably wrong.** Matching each log's
+  `App Launched with [exe]` line to process start time and exe path found the right log for the live
+  pid — while the most-recently-*modified* log on this machine belonged to a Bloom from a different
+  worktree. "Newest file wins" would have attached the wrong log. No handle enumeration needed. Bonus:
+  that line carries the full command line, which is what §3.3 needs to spot automation runs.
+- **Debugger detection fired on a real Bloom** — the developer's running Bloom is under the VS debugger,
+  a live reminder of how often the state that must never be reported is the state we are looking at.
+
+**Next:** Phase 1. Two spike items are deliberately left: wait chains against a real deadlock (low
+stakes — the plan never leaned on WCT), and a read-only pass over an *installed* Bloom to confirm 6.3's
+hardcoded CDP port 9222 and path-based channel detection. The latter wants doing at a time that suits
+John, since launching his installed Bloom opens his real collection.
