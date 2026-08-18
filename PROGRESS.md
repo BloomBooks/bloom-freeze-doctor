@@ -87,7 +87,36 @@ prose. **Backport list reordered** so the heartbeat leads, per John.
 - **Debugger detection fired on a real Bloom** — the developer's running Bloom is under the VS debugger,
   a live reminder of how often the state that must never be reported is the state we are looking at.
 
-**Next:** Phase 1. Two spike items are deliberately left: wait chains against a real deadlock (low
-stakes — the plan never leaned on WCT), and a read-only pass over an *installed* Bloom to confirm 6.3's
-hardcoded CDP port 9222 and path-based channel detection. The latter wants doing at a time that suits
-John, since launching his installed Bloom opens his real collection.
+## 2026-08-18 — installed-Bloom verification, and Phase 1 started
+
+**Verified against a real installed Bloom 6.3.2** — the very version in BL-16697. Launched it, probed
+it read-only, then closed it cleanly (it popped its Community Forum notice on the way up, which was
+Bloom's own doing, not ours). Everything the plan assumed about field configuration holds: channel
+derived as `Release` from `AppData\Local\Bloom\current\Bloom.exe`; **CDP answered on the hardcoded port
+9222**, confirming from behaviour what we had only read in the 6.3 source; log mapping picked the right
+`Log.txt` for the live pid; and `WriteDump` produced **7.5 MB in 1.4 s** with 49 managed threads, 36
+walkable, the UI thread reading `Bloom.Program.Main → Run → message loop → WaitMessage`.
+
+Two findings from that pass worth keeping:
+
+- **Deriving the channel needs one deliberate difference from Bloom's own code.** Bloom tests for a
+  path ending in `Bloom.dll`, because it asks about its entry assembly; from outside we see the
+  process, whose main module is `Bloom.exe`. Copying Bloom's logic verbatim would classify every
+  developer build as **Release** — the dangerous direction, since it is what would make a `pnpm go`
+  session file cards. Ours tests for `/output/Debug/` without requiring the extension.
+- **`pnpm go` runs are not debugger-attached.** `go.mjs` → `watchBloomExe.mjs` → `dotnet watch`, with
+  no debugger anywhere. It does not matter, though: the channel check catches those runs regardless,
+  which is the more reliable guard.
+- A healthy Bloom has **two** top-level windows titled "Bloom", one invisible. It is the splash screen,
+  which `SplashScreen.cs` deliberately `Hide()`s rather than `Close()`s so that closing it cannot close
+  a dialog it owns. Hence zombie detection must count *visible* windows, and `Process.MainWindowHandle`
+  should not be trusted to identify Bloom's real window.
+
+**Phase 1 started:** `src/BloomFreezeDoctor.Core` now holds `FreezeDetector`, the detection state
+machine, with 12 passing tests in `tests/BloomFreezeDoctor.Core.Tests`. It is deliberately free of any
+process or window API so it can be tested without a frozen Bloom, and every non-obvious rule cites the
+spike finding behind it. Thresholds live in `DetectorThresholds` (decision D3's numbers).
+
+**Next:** the parts that talk to the real world — a `BloomTargetWatcher` that produces
+`TargetObservation`s from a live process (window probe, visible-window count, sticky debugger flag,
+log/port discovery), then the gatherer and the report bundle, then the outbox, then the window.
