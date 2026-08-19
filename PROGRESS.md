@@ -221,8 +221,29 @@ empty result is expected for a managed deadlock, because otherwise an empty sect
 all-clear; and the log collector **copies** Bloom's log into the bundle rather than referencing it, since
 Bloom overwrites `Log.txt` on its very next run.
 
-**Next, in order:** wire the watcher, gatherer and outbox together into the actual
-`BloomFreezeDoctor.exe` — the status window (§2.1), the single-instance rendezvous and session adoption
-(§6), `--report-now`, `--list-queue`, `--drain`; then Velopack packaging and the signed GHA release
-(D7's recipe is in the plan). After that, the Bloom-side changes on `BL-16719-Freeze-Doctor`, heartbeat
-first.
+## 2026-08-19 — it is an application now, and it files reports by itself
+
+`BloomFreezeDoctor.exe` runs end to end unaided. Started against a stand-in process, it discovered it,
+watched it, **detected the freeze at the 60-second threshold on its own**, gathered, queued, and filed
+`AUT-20846` with a 2.3 MB dump restricted to the Developers group — staying responsive throughout. Test
+card deleted.
+
+The **rendezvous (§6) is verified**: a second instance launched while the first was running handed off and
+exited with code 0, leaving one Doctor. No handshake protocol — whoever holds the `Local\` mutex is the
+Doctor, and Bloom's only job is to make sure one is running.
+
+Also added `.github/workflows/build-and-release.yml`: build, test, publish, sign the exe, `vpk pack`, sign
+the installer, draft a release. PRs build and test but never sign. The release step globs rather than
+naming files, because signing renames them.
+
+**A trap worth knowing about, because it caught me even though the spike had already established it.**
+My first run of this test looked like the Doctor failing to detect anything. It was not failing: I had
+frozen the stub with the **STA managed wait**, which is exactly the freeze that cannot be seen from
+outside — the frozen stub even reported `Responding=True`. To test Tier A detection, freeze with a plain
+block (`sleep`); the STA case (`stawait`) needs the heartbeat only Bloom can publish, and is the reason
+Tier B exists.
+
+**Next, in order:** run the Doctor against a real Bloom (read-only observation first, then a deliberate
+`--report-now`); a smoke test of the GHA workflow on a branch with `use-test-certificate` so we exercise
+signing without producing distributable binaries; then the Bloom-side changes on
+`BL-16719-Freeze-Doctor` — **heartbeat first**, then the session file, then the clean-exit proof (§9.1).
