@@ -173,7 +173,34 @@ being debugged from Visual Studio. The §3.5 defence works against a real target
 and it is a reminder of how often a developer's Bloom is in exactly the state that must never be
 reported.
 
-## 11. Wait chains — nothing yet, as predicted
+## 11. LIMITATION — only one of Bloom's WebView2s is ever inspectable over CDP
+
+Running the finished Doctor against a real installed 6.3.2 produced a WebView2 section that talked to the
+browser happily — and reported exactly **one** page target, `about:blank`. A Bloom sitting on its
+Collections tab plainly has more going on than that.
+
+The cause is visible in Bloom's own log: it creates several WebView2s, each with **its own user data
+folder** (`Bloom WV2-80892`, `…-80893`, and so on). A distinct user data folder means a distinct browser
+process, and Bloom passes **the same `--remote-debugging-port` to all of them** — 9222 in 6.3,
+`httpPort + 2` in 6.4 and later. Only one process can bind a port, so:
+
+- exactly one of Bloom's WebView2s ends up listening, and
+- **which one is a race**, so it is quite likely not the one you want.
+
+In this test the winner was an `about:blank` view, i.e. the least informative one available.
+
+**What this means for the plan.** §4.3's renderer-responsiveness signal is still worth having — a wedged
+*browser process* affects all views in that process, and the healthy-versus-wedged answer is still the
+triage fork it always was — but it must be read as being about *one arbitrary WebView2*, not about
+Bloom's UI as a whole. The report should say so rather than implying wider coverage.
+
+**And it is a Tier B opportunity worth taking.** Bloom knows which of its WebView2s is which. Giving each
+one a distinct debugging port and publishing the list (with what each view is for) in the session file
+would turn this section from "one arbitrary view answered" into "the editing view is wedged and the
+toolbox view is fine" — which is a genuinely different quality of evidence. Cheap to do on the Bloom
+side, and it needs no new mechanism, just a port number per WebView2 and a line in the session file.
+
+## 12. Wait chains — nothing yet, as predicted
 
 `GetThreadWaitChain` returned no chains worth printing for a healthy process or for one blocked in a
 managed wait, consistent with §4.2's warning that WCT does not see `Monitor`/`SemaphoreSlim`/async

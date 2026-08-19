@@ -139,8 +139,13 @@ public sealed class DoctorSupervisor : IDisposable
         var verdict = new DetectorVerdict
         {
             State = TargetState.Healthy,
-            Report = ReportReason.Frozen,
-            Explanation = "a person asked for this report deliberately; Bloom was not necessarily frozen",
+            // Deliberately NOT ReportReason.Frozen: this Bloom may be perfectly healthy, and a card
+            // titled "UI frozen" about a healthy Bloom would send someone hunting a freeze that never
+            // happened.
+            Report = ReportReason.RequestedByPerson,
+            Explanation =
+                "a person asked for this report deliberately (the Report now button, or --report-now); "
+                + "Bloom was not necessarily frozen",
         };
         return await GatherFileAndRecordAsync(facts, verdict, mayFile: true, cancellation)
             .ConfigureAwait(false);

@@ -126,6 +126,14 @@ public enum ReportReason
     /// separate corroboration, which the detector does not have and does not pretend to.
     /// </summary>
     ExitedWithoutProof,
+
+    /// <summary>
+    /// A person asked for this report — the CTRL-key "Report now" button, or `--report-now`. Bloom was
+    /// not necessarily frozen, and the card must not claim it was: this exists because the first such
+    /// report came out titled "UI frozen" about a perfectly healthy Bloom, which would have wasted
+    /// somebody's afternoon.
+    /// </summary>
+    RequestedByPerson,
 }
 
 /// <summary>The detector's answer to one observation.</summary>

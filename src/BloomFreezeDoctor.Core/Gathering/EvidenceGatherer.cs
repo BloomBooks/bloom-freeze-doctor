@@ -160,6 +160,7 @@ public sealed class EvidenceGatherer
             ReportReason.DiedWhileFrozen => "UI froze, then the process died",
             ReportReason.Zombie => "UI gone but process still running",
             ReportReason.ExitedWithoutProof => "exited without shutting down properly",
+            ReportReason.RequestedByPerson => "snapshot requested by a person",
             _ => "problem",
         };
 

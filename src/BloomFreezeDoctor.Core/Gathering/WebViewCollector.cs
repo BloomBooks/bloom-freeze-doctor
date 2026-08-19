@@ -50,6 +50,14 @@ public sealed class WebViewCollector : IEvidenceCollector
         var text = new StringBuilder();
 
         text.AppendLine($"Debugging port {port}.");
+        text.AppendLine();
+        text.AppendLine(
+            "> **Read this section as being about one WebView2, not about all of Bloom's.** Bloom gives "
+                + "each WebView2 its own user data folder, so each runs in its own browser process, and it "
+                + "passes them all the same debugging port — only one can bind it, and which one is a race. "
+                + "So a healthy answer here does not clear every view, and the view we reached may not be "
+                + "the interesting one."
+        );
         var version = await CdpClient
             .ReadBrowserVersionAsync(port, TimeSpan.FromSeconds(5), cancellation)
             .ConfigureAwait(false);
