@@ -15,4 +15,11 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Reading the Windows Event Log for crash and unexpected-shutdown entries (plan 4.4). -->
+    <PackageReference Include="System.Diagnostics.EventLog" Version="8.0.1" />
+    <!-- Reading another process's command line, to spot automation runs and the WebView2 debug port. -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
 </Project>

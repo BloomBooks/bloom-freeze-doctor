@@ -7,8 +7,8 @@ changed and why: rev 2 folded in a review by Fable, rev 3–5 the decisions in �
 and rev 6 the first Phase 0 spike findings (see `docs/SPIKE-FINDINGS.md`, which supersedes this
 document wherever the two disagree, because it was measured).
 
-All nine decisions in §10 are settled. What remains open is one *mechanism* — how we sign (D7) — and
-the spike work itemized at the end of the findings document.
+All nine decisions in §10 are settled, D7's signing mechanism included `[rev7]`. What remains is the
+spike work itemized at the end of the findings document, and the building.
 
 ## 1. The problem, and the three states we must diagnose
 
@@ -639,24 +639,29 @@ My recommendation first in each.
   `auto_report_creator` token — BloomDesktop is already public and already carries it in the clear, so
   this adds no new exposure. A serverless relay (nothing shipped) stays on the list as later hardening
   for both apps, not a prerequisite.
-- **D7 — Signing. DECIDED `[rev5]`: we sign. Mechanism pending your research.** No unsigned public
-  installer, for the AV/EDR reasons in §7. You are checking whether the organization can sign from
-  GitHub or whether this needs a TeamCity step; either satisfies the gate. What the plan needs from the
-  answer, so it can be built for whichever way it lands:
-  - **If GitHub can sign** (Azure Trusted Signing, SignPath's OSS plan, or an org credential usable from
-    Actions): the release stays entirely in GHA, `vpk pack` gains sign parameters, and the private key
-    never leaves the signing service. Cleanest outcome.
-  - **If it needs TeamCity**: GHA builds and tests, and a small TeamCity job does sign-and-publish using
-    the same `sign` command Bloom already uses (`build/Bloom.proj`), with the GitHub release created
-    from there. Slightly more moving parts, no new secret handling, and it reuses a path we know works.
-  - **Either way, sign the exe as well as the installer.** Velopack ships the exe inside the package, and
-    an unsigned exe inside a signed installer is exactly what behavioural AV objects to (§7) — Bloom
-    already signs `Bloom.exe` and `BloomPdfMaker.exe` separately for this reason.
-  - **Both artifacts get signed before we ship — this is settled, not an option** `[rev5]`: the
-    `BloomFreezeDoctor.exe` *and* the installer. Velopack ships the exe inside the package, and an
-    unsigned exe inside a signed installer is exactly what behavioural AV objects to (§7); Bloom already
-    signs `Bloom.exe` and `BloomPdfMaker.exe` separately for the same reason. (No arm64 question to ask
-    any more — see §4.5.)
+- **D7 — Signing. FULLY SETTLED, mechanism included `[rev7]`.** BloomBooks already signs from GitHub
+  Actions, so the release stays entirely in GHA and no TeamCity step is needed. The pattern comes from
+  `BloomBooks/bloompub-viewer`'s `main.yml`:
+  - **`sillsdev/codesign/trusted-signing-action@v3`** — an SIL wrapper around **Azure Trusted
+    Signing** — authenticated with a `TRUSTED_SIGNING_CREDENTIALS` secret (a JSON blob of
+    tenant/client/secret/endpoint/account, masked in the logs). No certificate or private key ever
+    touches the runner.
+  - Guarded with `if: github.event_name != 'pull_request'`, so pull requests build and test without
+    consuming signing quota.
+  - It takes `files` (explicit paths) or `files-folder` plus `files-folder-filter`, so **signing the exe
+    and the installer is two invocations of the same action**: once over `BloomFreezeDoctor.exe` before
+    `vpk pack`, once over the packed installer afterwards. That is how we satisfy the sign-both
+    requirement — Velopack ships the exe inside the package, and an unsigned exe inside a signed
+    installer is exactly what behavioural AV objects to (§7), which is why Bloom signs `Bloom.exe` and
+    `BloomPdfMaker.exe` separately as well.
+  - `use-test-certificate: true` exists for exercising the pipeline without producing distributable
+    binaries. Worth using while the workflow is being written, rather than signing junk with the real
+    certificate.
+  - **Gotcha to design around, from the viewer's own comment: signing renames the file.** Theirs goes
+    from `BloomPUB-Viewer-Setup-<x.y.z>.exe` to `BloomPub.Viewer Setup <x.y.z>.exe`, and uploading turns
+    the spaces into periods; they cope by globbing both forms in the release step. Our release step must
+    not assume the name it produced survives signing.
+  - (No arm64 question to ask any more — see §4.5.)
 - **D8 — Ordering. DECIDED `[rev5]`: as recommended, with two riders.** Tier A leads, because it helps
   someone frozen on 6.3.2 today; whichever is ready first wins, and the Bloom-side changes proceed in
   parallel as time permits. Plus: **a safe subset gets backported to 6.4** — see §9.1 for the ranked
