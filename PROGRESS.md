@@ -197,9 +197,32 @@ Two decisions inside worth knowing:
   three weeks late cannot read as though it were fresh, and Bloom's version is labelled as its version
   *at the time*.
 
-**Next, in order:** the remaining collectors (wait chains, CDP renderer-responsiveness probe, Bloom log
-tail, event log and WER, system stats, network probe) — porting `spike/Probe` rather than rewriting;
-then wiring the watcher, gatherer and outbox together into the actual `BloomFreezeDoctor.exe` with the
-status window (§2.1) and the rendezvous (§6); then the Velopack packaging and the GHA release with
-signing (D7's recipe is in the plan). After that, the Bloom-side changes on `BL-16719-Freeze-Doctor`,
-heartbeat first.
+## 2026-08-19 — the report is complete for Tier A
+
+All six collectors are in and wired into the default gatherer, in report order. A gather now takes about
+eight seconds and produces: managed stacks, process state, wait chains, the WebView2 interrogation,
+Bloom's log with the installer log and Windows' crash records, and the machine-and-network state.
+
+Verified along the way:
+
+- **The WebView2 responsiveness probe works both ways** — tested against a real Chromium rather than
+  only against Bloom, so it needed no launching of the developer's Bloom. Healthy pages answered in
+  2–3 ms; a page deliberately wedged with `while(true){}` was correctly reported as not answering within
+  four seconds while its siblings answered normally. That distinction (renderer wedged versus .NET
+  wedged) is the most valuable single signal in the section.
+- **The fingerprint distinguishes freeze *kinds*.** A `Thread.Sleep` freeze and a `Monitor.Wait` freeze
+  produced different fingerprints, which is what we want — the same blocking call is the same problem,
+  a different one is not.
+- **Running the machine collector here found something real:** Bloom's collections folder on this machine
+  sits inside OneDrive. Exactly the kind of thing nobody thinks to ask a user about.
+
+Two things worth knowing when reading a card: the wait-chain section **says in its own output** that an
+empty result is expected for a managed deadlock, because otherwise an empty section reads as an
+all-clear; and the log collector **copies** Bloom's log into the bundle rather than referencing it, since
+Bloom overwrites `Log.txt` on its very next run.
+
+**Next, in order:** wire the watcher, gatherer and outbox together into the actual
+`BloomFreezeDoctor.exe` — the status window (§2.1), the single-instance rendezvous and session adoption
+(§6), `--report-now`, `--list-queue`, `--drain`; then Velopack packaging and the signed GHA release
+(D7's recipe is in the plan). After that, the Bloom-side changes on `BL-16719-Freeze-Doctor`, heartbeat
+first.

@@ -45,9 +45,24 @@ public sealed class EvidenceGatherer
     /// </summary>
     public static readonly TimeSpan TotalBudget = TimeSpan.FromMinutes(2);
 
-    /// <summary>Creates a gatherer with the default set of collectors, in report order.</summary>
+    /// <summary>
+    /// Creates a gatherer with the default collectors, **in the order they appear in the report**. That
+    /// order is deliberate: whoever opens the card should meet the managed stacks first, because they
+    /// usually contain the answer, and the machine-and-network section last, because it usually only
+    /// rules things out.
+    /// </summary>
     public EvidenceGatherer()
-        : this(new IEvidenceCollector[] { new ManagedStacksCollector(), new ProcessEvidenceCollector() })
+        : this(
+            new IEvidenceCollector[]
+            {
+                new ManagedStacksCollector(),
+                new ProcessEvidenceCollector(),
+                new WaitChainCollector(),
+                new WebViewCollector(),
+                new BloomLogCollector(),
+                new SystemEvidenceCollector(),
+            }
+        )
     { }
 
     /// <summary>Creates a gatherer with a specific set of collectors, for tests.</summary>
