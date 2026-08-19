@@ -243,7 +243,46 @@ outside — the frozen stub even reported `Responding=True`. To test Tier A dete
 block (`sleep`); the STA case (`stawait`) needs the heartbeat only Bloom can publish, and is the reason
 Tier B exists.
 
-**Next, in order:** run the Doctor against a real Bloom (read-only observation first, then a deliberate
-`--report-now`); a smoke test of the GHA workflow on a branch with `use-test-certificate` so we exercise
-signing without producing distributable binaries; then the Bloom-side changes on
-`BL-16719-Freeze-Doctor` — **heartbeat first**, then the session file, then the clean-exit proof (§9.1).
+## 2026-08-19 — Tier B works on a real Bloom, and Bloom's side is complete
+
+**The headline: the Doctor catches the freeze that cannot be seen from outside.** With Bloom publishing a
+heartbeat, a deliberately frozen Bloom produced:
+
+> **Verdict:** UI-thread heartbeat stale for 1.9 minutes with no forward progress
+> - The UI thread is blocked in `System.Threading.Monitor.ObjWait`.
+> - WebView2 answers normally, so the block is in Bloom's .NET UI thread, not the browser.
+
+…while Windows reported `Responding = True` throughout. Measured directly on the channel:
+`uiAge=364.8s` alongside `watchdogAge=0.2s`. That contrast is the whole justification for Tier B and it
+now exists rather than being argued.
+
+**Bloom's side is done** (branch `BL-16719-Freeze-Doctor`, two commits):
+
+- **The heartbeat**, plus a background watchdog beat so "the UI thread is blocked" can be told from "the
+  whole process is wedged", and the clean-exit proof from `ProcessExit`.
+- **The session file**, which proved its own worth on the first real run: Bloom recorded its log as
+  `Log-tmplo0jmp.txt`, the fallback name — so anything inferring "the newest `Log*.txt`" would have
+  attached a different run's log. It also carries the ports, which cannot be discovered from outside at
+  all (http.sys owns Bloom's).
+- **The in-flight API table**, instrumented at the inner dispatch where the work and the lock-waiting
+  actually happen. Published through the existing activity field, so no layout change was needed.
+- **Auto-launch**: Bloom started the Doctor one second after itself, with no handshake — Bloom's only job
+  is to make sure one is running.
+- **`FreezeSimulator`**, inert unless `BLOOM_SIMULATE_FREEZE` is set *and* the build is a developer one.
+
+**A safeguard proved itself by accident.** The auto-launched Doctor was pointed at the real `BL` project
+by default, detected the freeze, gathered the whole report — and filed nothing, recording
+`State: NotForFiling` because Bloom was a developer build. Exactly the intended behaviour, tested without
+meaning to.
+
+**And a process fix.** Three times in one afternoon I tested against a stale binary — twice Bloom's, once
+the Doctor's — because the *test project* builds its own copy of Core, so a green test run says nothing
+about what is in `BloomFreezeDoctor.exe`. There is now a `build.ps1` that builds the whole solution, runs
+the tests, stops any running Doctor first (a running instance locks its own DLLs and the build fails with
+an MSB3027 that reads as a mystery), and prints the exe's timestamp so staleness is visible at a glance.
+**Use it before testing the app by hand.**
+
+**Next:** the zombie-ending path (§3.6/D9) and the crash-time dump handshake (§6), then verifying the
+Velopack packaging and the signed release workflow. The **6.4 backport in §9.1 is deliberately on hold**
+until 6.5 has had field testing — John's call, and the right one: backporting a heartbeat we have only
+ever seen work on our own machines would be premature.

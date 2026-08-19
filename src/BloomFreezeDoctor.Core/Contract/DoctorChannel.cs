@@ -1,3 +1,10 @@
+// Explicit usings and an explicit nullable context, rather than relying on the project's settings.
+// This file is copied into BloomDesktop, which has neither ImplicitUsings nor nullable enabled, so
+// depending on them would mean the copy could not be byte-identical — and a file that has to be edited
+// on the way in is a file that will drift.
+#nullable enable
+using System;
+using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Text;
 

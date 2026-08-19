@@ -538,7 +538,14 @@ We cannot wait for real freezes, so we build the triggers:
 | **3. Bloom cooperation (BloomDesktop PR)** | MMF heartbeat + minor-event ring, breadcrumbs and in-flight API table, session/exit/reported markers, auto-launch and rendezvous, bounded crash-time dump handshake, dev-only freeze triggers, optional CTRL+Help manual launch. | Better data *and* the detector that catches the STA-wait freezes Tier A misses — but gated on a Bloom release, so it runs in parallel with 1–2. |
 | **4. Extras** | Admin-only extras, dump retention policy, Doctor self-update. **Continuous CDP console/network recording is cut** `[rev2]` — permanently attaching to every user's WebView2 with Network/Console enabled is standing overhead for speculative benefit; the at-freeze responsiveness probe plus ~10 s capture is the 90% version. Revisit only if a real card shows we needed the history. | Refinements once the core has shown what is actually useful. |
 
-### 9.1 A safe subset to backport into 6.4 `[rev5]`
+### 9.1 A safe subset to backport into 6.4 — ON HOLD `[rev8]`
+
+> **Deferred deliberately until 6.5 has had field testing.** The Bloom-side work is written and merged on
+> `BL-16719-Freeze-Doctor`, and it works — but it has only ever been seen to work on our own machines, on
+> freezes we caused on purpose. Backporting a heartbeat into a released line on that basis would be
+> premature. Once 6.5 has been in real users' hands and the reports that come back are the ones we
+> expected, revisit the ranked list below.
+
 
 Worth doing, and the value/risk ratio is better than expected: the two most valuable pieces of Tier B
 are also the safest, because they are write-only, additive, and impossible to fail in a way that

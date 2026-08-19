@@ -64,6 +64,18 @@ public sealed record GatherContext
 
     /// <summary>WebView2's debugging port, if we discovered one for this process.</summary>
     public int? CdpPort { get; init; }
+
+    /// <summary>
+    /// What Bloom recorded about itself at startup, or null for a Bloom that publishes nothing — which is
+    /// every Bloom in the field today, so nothing may depend on this being present.
+    /// </summary>
+    public Contract.DoctorSession? Session { get; init; }
+
+    /// <summary>
+    /// The live state Bloom published at the moment we decided to gather: heartbeats, what it thought it was
+    /// doing, its server's worker counts. Null for a Bloom that publishes nothing.
+    /// </summary>
+    public Contract.DoctorChannelSnapshot? PublishedState { get; init; }
 }
 
 /// <summary>

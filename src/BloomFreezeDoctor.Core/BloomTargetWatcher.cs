@@ -116,10 +116,12 @@ public sealed class BloomTargetWatcher : IDisposable
             if (!verdict.ShouldReport)
                 return;
 
-            // Two independent reasons never to file, checked here rather than left to the gatherer so
-            // that the decision is in one place: this target has been under a debugger at some point,
-            // or it is a developer/automation run.
-            var mayFile = !_detector.IsPoisonedByDebugger && !Target.NeverFile;
+            // Three independent reasons never to file, checked here rather than left to the gatherer so
+            // that the decision lives in one place: this target has been under a debugger at some point;
+            // it is a developer or automation run; or Bloom's own reporting has already told us about
+            // this problem, in which case a second card is noise about the same trouble.
+            var mayFile =
+                !_detector.IsPoisonedByDebugger && !Target.NeverFile && !BloomAlreadyReported();
             ReportWanted?.Invoke(
                 this,
                 new ReportWantedEventArgs
@@ -139,6 +141,29 @@ public sealed class BloomTargetWatcher : IDisposable
         finally
         {
             Interlocked.Exchange(ref _observing, 0);
+        }
+    }
+
+    /// <summary>
+    /// True when Bloom has already reported a problem for this run. Bloom writes this into its session file
+    /// the moment one of its own reports succeeds, so a user who filed a problem report by hand and a Doctor
+    /// that noticed the same trouble do not produce two cards about it.
+    ///
+    /// Read fresh each time rather than cached: the interesting case is Bloom reporting *while* we are
+    /// deciding, which is precisely when the two would otherwise collide.
+    /// </summary>
+    private bool BloomAlreadyReported()
+    {
+        try
+        {
+            var session = Contract.DoctorSessionStore.TryRead(Target.ProcessId);
+            return session?.Exit?.BloomAlreadyReported == true;
+        }
+        catch (Exception)
+        {
+            // If we cannot tell, err towards reporting: a duplicate card is a smaller loss than silence
+            // about a real freeze.
+            return false;
         }
     }
 

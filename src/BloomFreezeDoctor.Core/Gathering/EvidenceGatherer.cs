@@ -211,7 +211,17 @@ public sealed class EvidenceGatherer
         text.AppendLine(
             $"| WebView2 debug port | {(context.CdpPort.HasValue ? context.CdpPort.ToString() : "not found")} |"
         );
+        if (context.Session != null)
+        {
+            text.AppendLine($"| Bloom version | {context.Session.Version} |");
+            if (!string.IsNullOrEmpty(context.Session.CollectionName))
+                text.AppendLine($"| Collection | {context.Session.CollectionName} |");
+        }
         text.AppendLine();
+
+        // What Bloom itself said it was doing is often the most useful line in the whole report — a stack
+        // says the UI thread is waiting, this says which request has been running for 47 seconds.
+        AppendWhatBloomSaid(text, context);
 
         foreach (var section in sections)
         {
@@ -236,6 +246,72 @@ public sealed class EvidenceGatherer
         );
         return text.ToString();
     }
+
+    /// <summary>
+    /// Quotes what Bloom published about itself through the shared channel: what it thought it was doing,
+    /// how its heartbeats were faring, and how its server's workers were placed. Absent for every Bloom in
+    /// the field that predates this, so it says so plainly rather than leaving a gap.
+    /// </summary>
+    private static void AppendWhatBloomSaid(StringBuilder text, GatherContext context)
+    {
+        text.AppendLine("### What Bloom said about itself");
+        text.AppendLine();
+
+        if (context.PublishedState == null)
+        {
+            text.AppendLine(
+                "Nothing: this Bloom does not publish a health channel, so everything below was observed "
+                    + "from outside. That is the normal case for a Bloom released before the Freeze Doctor "
+                    + "existed."
+            );
+            text.AppendLine();
+            return;
+        }
+
+        var state = context.PublishedState;
+        text.AppendLine("| | |");
+        text.AppendLine("| --- | --- |");
+        text.AppendLine(
+            $"| What Bloom thought it was doing | {(string.IsNullOrWhiteSpace(state.Activity) ? "(nothing in particular)" : state.Activity)} |"
+        );
+        text.AppendLine($"| UI-thread heartbeat last beat | {Describe(state.UiHeartbeatAge)} ago |");
+        text.AppendLine(
+            $"| Background heartbeat last beat | {Describe(state.WatchdogHeartbeatAge)} ago |"
+        );
+        text.AppendLine(
+            $"| Server workers | {state.ServerBusyWorkers} busy, {state.ServerBlockedWorkers} blocked |"
+        );
+        if (state.ShutdownPhase > 0)
+            text.AppendLine($"| Shutdown had reached phase | {state.ShutdownPhase} |");
+        if (state.LongOperationInProgress)
+            text.AppendLine("| Bloom said it was | deliberately busy on a long operation |");
+        text.AppendLine();
+
+        // The comparison that identifies the freeze class, spelled out so nobody has to work it out.
+        if (
+            state.UiHeartbeatAge > TimeSpan.FromSeconds(5)
+            && state.WatchdogHeartbeatAge <= TimeSpan.FromSeconds(5)
+        )
+            text.AppendLine(
+                "> **The UI thread stopped while the rest of the process kept running.** That is the "
+                    + "signature of a blocked UI thread rather than a wedged process — and if the window was "
+                    + "still answering messages, of a managed wait on the STA thread, which nothing outside "
+                    + "Bloom can detect."
+            );
+        else if (state.UiHeartbeatAge > TimeSpan.FromSeconds(5))
+            text.AppendLine(
+                "> **Both heartbeats stopped**, so the whole process is wedged rather than just its UI "
+                    + "thread — a garbage collection that will not finish, or a suspended process."
+            );
+        text.AppendLine();
+    }
+
+    private static string Describe(TimeSpan age) =>
+        age == TimeSpan.MaxValue
+            ? "never"
+            : age.TotalSeconds < 90
+                ? $"{age.TotalSeconds:F0}s"
+                : $"{age.TotalMinutes:F1} minutes";
 
     private static string Trim(string value, int max) =>
         value.Length <= max ? value : value.Substring(0, max - 1) + "…";

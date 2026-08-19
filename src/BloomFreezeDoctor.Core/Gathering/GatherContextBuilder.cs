@@ -24,15 +24,50 @@ public static class GatherContextBuilder
         string? logDirectory = null
     )
     {
+        // Bloom's own session file, when there is one, is better than anything we can work out from
+        // outside — and for the log path it is better in a way that matters: guessing from the filesystem
+        // is systematically wrong in the restart-after-a-freeze case (see BloomLogLocator).
+        var session = Contract.DoctorSessionStore.TryRead(target.ProcessId);
+
         return new GatherContext
         {
             Target = target,
             Verdict = verdict,
             ProcessWasAlive = processWasAlive,
             ArtifactDirectory = artifactDirectory,
-            BloomLogPath = FindLog(target, logDirectory),
-            CdpPort = FindCdpPort(target),
+            BloomLogPath = FirstUsable(session?.LogPath, () => FindLog(target, logDirectory)),
+            CdpPort = session is { CdpPort: > 0 } ? session.CdpPort : FindCdpPort(target),
+            Session = session,
+            PublishedState = ReadPublishedState(target.ProcessId),
         };
+    }
+
+    /// <summary>
+    /// Reads Bloom's live published state, if it publishes any. Read at gather time rather than taken from
+    /// the watcher so that the report quotes the state at the moment we decided to gather, which is the
+    /// moment a reader will be asking about.
+    /// </summary>
+    private static Contract.DoctorChannelSnapshot? ReadPublishedState(int processId)
+    {
+        try
+        {
+            return Contract.DoctorChannelReader.TryRead(processId, out var snapshot) ? snapshot : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Prefers what Bloom told us, falling back to working it out ourselves. The fallback is a function so
+    /// that the expensive inference only happens when Bloom has not answered.
+    /// </summary>
+    private static string? FirstUsable(string? preferred, Func<string?> fallback)
+    {
+        if (!string.IsNullOrEmpty(preferred) && File.Exists(preferred))
+            return preferred;
+        return fallback();
     }
 
     /// <summary>

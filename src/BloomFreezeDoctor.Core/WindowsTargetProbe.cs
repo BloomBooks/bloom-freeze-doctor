@@ -90,6 +90,7 @@ public sealed class WindowsTargetProbe : ITargetProbe
 
         var window = FindMainWindow();
         var responds = window != IntPtr.Zero && WindowAnswers(window);
+        var published = ReadPublishedState();
 
         return new TargetObservation
         {
@@ -97,9 +98,66 @@ public sealed class WindowsTargetProbe : ITargetProbe
             IsAlive = true,
             WindowResponds = responds,
             HasVisibleWindow = window != IntPtr.Zero,
+            // Bloom's own answer wins over our guess when we have it: it is authoritative, and it is why
+            // a developer stopping their debugger never produces a report.
             DebuggerAttached = _everDebugged,
+            HeartbeatIsStale = published.HeartbeatIsStale,
+            UiBlockCorroborated = published.UiBlockCorroborated,
+            LongOperationInProgress = published.LongOperation,
+            // Bloom's heartbeat age says how long the UI thread has ALREADY been stuck, which lets a
+            // Doctor started because Bloom is frozen report at once rather than waiting out a threshold
+            // that has in truth already passed.
+            AlreadyUnresponsiveFor = published.UiBlockCorroborated ? published.StaleFor : null,
         };
     }
+
+    /// <summary>
+    /// What Bloom publishes about itself, if it publishes anything. Every Bloom in the field today
+    /// publishes nothing, so this must be cheap and silent when the channel is absent — which it is: a
+    /// failed `OpenExisting` and nothing more.
+    /// </summary>
+    private (
+        bool HeartbeatIsStale,
+        bool UiBlockCorroborated,
+        bool LongOperation,
+        TimeSpan StaleFor
+    ) ReadPublishedState()
+    {
+        if (!Contract.DoctorChannelReader.TryRead(_process.Id, out var snapshot) || snapshot == null)
+        {
+            PublishedSnapshot = null;
+            return (false, false, false, TimeSpan.Zero);
+        }
+        PublishedSnapshot = snapshot;
+
+        if (snapshot.DebuggerAttached)
+            _everDebugged = true;
+
+        var uiStale = snapshot.UiHeartbeatAge > StaleHeartbeatThreshold;
+
+        // The corroboration that makes a stale UI heartbeat believable: the watchdog thread is still
+        // ticking, so the process is alive and scheduling threads and it is the UI thread *specifically*
+        // that is stuck. Without this we could not tell a blocked UI thread from a starved timer, and
+        // WM_TIMER — the lowest-priority message there is — really can be starved by a busy but live UI.
+        var watchdogHealthy = snapshot.WatchdogHeartbeatAge <= StaleHeartbeatThreshold;
+        var staleFor =
+            snapshot.UiHeartbeatAge == TimeSpan.MaxValue ? TimeSpan.Zero : snapshot.UiHeartbeatAge;
+
+        return (uiStale, uiStale && watchdogHealthy, snapshot.LongOperationInProgress, staleFor);
+    }
+
+    /// <summary>
+    /// The most recent state Bloom published, or null if it publishes none. Kept so the report can quote
+    /// what Bloom said it was doing.
+    /// </summary>
+    public Contract.DoctorChannelSnapshot? PublishedSnapshot { get; private set; }
+
+    /// <summary>
+    /// How old a heartbeat has to be before we call it stale. Bloom ticks every 500 ms, so this is ten
+    /// intervals — far beyond ordinary scheduling jitter, and it costs nothing to be generous because the
+    /// detector needs a full minute of staleness before it reports anything.
+    /// </summary>
+    private static readonly TimeSpan StaleHeartbeatThreshold = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// Asks the window to acknowledge a do-nothing message. This is the signal the spike settled on:

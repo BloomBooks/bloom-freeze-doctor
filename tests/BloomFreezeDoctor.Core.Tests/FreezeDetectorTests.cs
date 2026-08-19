@@ -173,7 +173,7 @@ public class FreezeDetectorTests
         var verdict = RunSeconds(
             1,
             60,
-            t => Healthy(t) with { HeartbeatIsStale = true, NoForwardProgress = true }
+            t => Healthy(t) with { HeartbeatIsStale = true, UiBlockCorroborated = true }
         );
 
         Assert.That(verdict.Report, Is.EqualTo(ReportReason.Frozen));
@@ -194,7 +194,7 @@ public class FreezeDetectorTests
         var verdict = RunSeconds(
             1,
             300,
-            t => Healthy(t) with { HeartbeatIsStale = true, NoForwardProgress = false }
+            t => Healthy(t) with { HeartbeatIsStale = true, UiBlockCorroborated = false }
         );
 
         Assert.That(verdict.State, Is.EqualTo(TargetState.Healthy));

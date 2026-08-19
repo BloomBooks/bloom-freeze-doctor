@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/spike/">
+    <Project Path="spike/FreezeStub/FreezeStub.csproj" />
+    <Project Path="spike/Probe/Probe.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/BloomFreezeDoctor.Core/BloomFreezeDoctor.Core.csproj" />
+    <Project Path="src/BloomFreezeDoctor/BloomFreezeDoctor.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BloomFreezeDoctor.Core.Tests/BloomFreezeDoctor.Core.Tests.csproj" />
+  </Folder>
+</Solution>

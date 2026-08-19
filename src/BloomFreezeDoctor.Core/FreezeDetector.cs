@@ -60,10 +60,15 @@ public readonly record struct TargetObservation
     public bool HeartbeatIsStale { get; init; }
 
     /// <summary>
-    /// Tier B only: no forward progress in Bloom's breadcrumbs or in-flight work. The corroborating
-    /// signal that lets a stale heartbeat be believed.
+    /// Tier B only: independent evidence that a stale UI heartbeat means a blocked UI thread rather than a
+    /// starved timer.
+    ///
+    /// Today this means **Bloom's background watchdog thread is still ticking while the UI thread is
+    /// not** — so the process is alive and scheduling threads, and it is the UI thread specifically that
+    /// is stuck. That is exactly the signature of a managed wait on the STA thread. When Bloom publishes
+    /// breadcrumbs and in-flight API calls, those become additional corroboration of the same kind.
     /// </summary>
-    public bool NoForwardProgress { get; init; }
+    public bool UiBlockCorroborated { get; init; }
 
     /// <summary>
     /// A debugger is attached right now. The detector makes this sticky, because a dead process
@@ -76,6 +81,17 @@ public readonly record struct TargetObservation
     /// the patience threshold rather than suppressing detection.
     /// </summary>
     public bool LongOperationInProgress { get; init; }
+
+    /// <summary>
+    /// How long the target has *already* been unresponsive at the moment we first looked, when that can
+    /// be known — which it can, from Bloom's published heartbeat, since the age of the last tick says
+    /// exactly how long ago the UI thread stopped.
+    ///
+    /// This exists for the case the whole tool has to handle well: someone installs the Doctor **because**
+    /// Bloom is already frozen. Without it, the Doctor would start its clock from the moment it happened
+    /// to arrive and make that person wait another minute to be told what they already knew.
+    /// </summary>
+    public TimeSpan? AlreadyUnresponsiveFor { get; init; }
 }
 
 /// <summary>
@@ -229,8 +245,11 @@ public sealed class FreezeDetector
         if (now.HasVisibleWindow)
             _lastHadWindowAt = now.Uptime;
 
-        // First look: nothing to measure from yet.
-        _lastRespondedAt ??= now.Uptime;
+        // First look. If the target can tell us how long it has already been unresponsive, believe it and
+        // backdate accordingly, so a Doctor started BECAUSE Bloom is frozen reports at once instead of
+        // making the user wait out a threshold that has in truth already passed. Without a published
+        // heartbeat we have no way to know, and the clock has to start now.
+        _lastRespondedAt ??= now.Uptime - (now.AlreadyUnresponsiveFor ?? TimeSpan.Zero);
         _lastHadWindowAt ??= now.Uptime;
 
         var unresponsiveFor = now.Uptime - _lastRespondedAt.Value;
@@ -300,7 +319,7 @@ public sealed class FreezeDetector
     /// lowest-priority message and a busy-but-live UI can starve it (plan §3.1).
     /// </summary>
     private static bool BelievesHeartbeatIsStale(TargetObservation now) =>
-        now.HeartbeatIsStale && (now.NoForwardProgress || !now.WindowResponds);
+        now.HeartbeatIsStale && (now.UiBlockCorroborated || !now.WindowResponds);
 
     /// <summary>
     /// Records the new state and suppresses a repeat of a reason we have already reported, so one
