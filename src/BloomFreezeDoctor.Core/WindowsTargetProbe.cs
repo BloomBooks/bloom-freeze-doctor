@@ -150,7 +150,11 @@ public sealed class WindowsTargetProbe : ITargetProbe
         }
     }
 
-    private static IEnumerable<IntPtr> EnumerateTopLevelWindows(int processId)
+    /// <summary>
+    /// Every top-level window owned by a process. Public because the report's window inventory needs
+    /// it too, and there should be exactly one implementation of this.
+    /// </summary>
+    public static IEnumerable<IntPtr> EnumerateTopLevel(int processId)
     {
         var windows = new List<IntPtr>();
         EnumWindows(
@@ -165,6 +169,19 @@ public sealed class WindowsTargetProbe : ITargetProbe
         );
         return windows;
     }
+
+    /// <summary>Whether a window is visible. See <see cref="FindMainWindow"/> for why this matters.</summary>
+    public static bool IsVisible(IntPtr window) => IsWindowVisible(window);
+
+    /// <summary>
+    /// Whether a window accepts input. A disabled main window is how a modal dialog gives itself
+    /// away — including one that is off-screen or behind the main window, which is a Bloom bug in its
+    /// own right.
+    /// </summary>
+    public static bool IsEnabled(IntPtr window) => IsWindowEnabled(window);
+
+    private static IEnumerable<IntPtr> EnumerateTopLevelWindows(int processId) =>
+        EnumerateTopLevel(processId);
 
     /// <summary>Reads a window's title, for the report's window inventory.</summary>
     public static string TitleOf(IntPtr window)
@@ -215,6 +232,9 @@ public sealed class WindowsTargetProbe : ITargetProbe
 
     [DllImport("user32.dll")]
     private static extern bool IsHungAppWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowEnabled(IntPtr window);
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr window, out RECT rect);

@@ -136,8 +136,41 @@ corroboration and `mayFile=True` for a target that looks like a real installed B
   may be filed (no debugger, ever; no developer or automation runs). Probe failures are swallowed
   deliberately: a watcher that throws stops watching.
 
-**Next, in order:** the exit classifier (the Phase 1 half of D4 — Event Log, WER, exit code — which the
-detector deliberately refuses to guess at); then the gatherer (`WriteDump` plus the OS-level evidence
-from the spike's Probe, which should be ported into Core rather than left in `spike/`); then the report
-bundle and outbox (§5.1); then the status window (§2.1). After that, the Bloom-side changes on
-`BL-16719-Freeze-Doctor` in BloomDesktop, heartbeat first.
+## 2026-08-19 — the exit classifier, the gatherer, and D7 settled
+
+**D7's mechanism is settled**, from the `bloompub-viewer` precedent John pointed at: BloomBooks signs in
+GitHub Actions via `sillsdev/codesign/trusted-signing-action@v3` (Azure Trusted Signing, credentials in a
+`TRUSTED_SIGNING_CREDENTIALS` secret). No TeamCity step. Signing exe *and* installer is two invocations of
+that action. Two things worth remembering, now recorded in the plan: `use-test-certificate: true` for
+developing the workflow, and **signing renames the file**, so the release step must not assume the name it
+produced survives.
+
+**`ExitClassifier`** implements both regimes of D4, separate from the detector on purpose. A test asserts
+the same evidence reaches opposite conclusions under Phase 1 and Phase 3 rules, since that distinction is
+what the phasing rests on. `WindowsExitEvidenceCollector` fills it from the Application and System event
+logs, both WER folders, Bloom's log tail and the boot time.
+
+**The gatherer works end to end.** Against a stub frozen in an STA managed wait it produces, in six
+seconds:
+
+> Freeze Doctor: UI frozen — The UI thread is blocked in `System.Threading.Monitor.ObjWait`. [Release]
+
+…followed by the full managed stack, the CPU sample ruling out a spin, the window inventory, WebView2
+children, unexpected modules, and a 2.2 MB dump attached. `ReportFingerprint` proved **stable across two
+runs with different pids**, which is what dedupe depends on.
+
+Two report-quality touches worth knowing when reading cards: when Windows calls the window responsive
+while we are reporting a freeze, the report **names that contradiction** as the STA-managed-wait signature
+instead of leaving a reader to puzzle over it; and the window inventory hides the half-dozen
+infrastructure windows every WinForms process carries, counting them instead, so the one that matters is
+not buried.
+
+**Next, in order:** the report bundle and outbox (§5.1 — gather to disk, file later, which is how a report
+survives the dead network that so often accompanies a freeze); the YouTrack submitter with fingerprint
+dedupe, exercised against project `AUT` first; the remaining collectors (wait chains, CDP, Bloom log,
+event log and WER, system stats, network probe); then the status window (§2.1). After that, the Bloom-side
+changes on `BL-16719-Freeze-Doctor` in BloomDesktop, heartbeat first.
+
+**Note for whoever picks this up:** `spike/Probe` still holds gathering logic (wait chains, CDP probing,
+system facts) not yet ported into `Core`. Port it rather than rewrite it — it has been tested against real
+Blooms.
