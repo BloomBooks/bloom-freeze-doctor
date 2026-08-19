@@ -174,3 +174,32 @@ changes on `BL-16719-Freeze-Doctor` in BloomDesktop, heartbeat first.
 **Note for whoever picks this up:** `spike/Probe` still holds gathering logic (wait chains, CDP probing,
 system facts) not yet ported into `Core`. Port it rather than rewrite it — it has been tested against real
 Blooms.
+
+## 2026-08-19 — a report reaches the tracker, end to end
+
+**The whole pipeline works.** Gathered from a stub frozen in an STA managed wait → queued on disk → filed
+to the tracker's `AUT` test project, with a 2.3 MB dump attached and **restricted to the Developers
+group** (D2's requirement, verified on the card itself, not just in code). Then a second occurrence from
+a **fresh outbox** — so local folding could not mask the result — found that card by fingerprint and
+commented on it rather than filing a second. Test card and comment deleted afterwards; nothing left
+behind.
+
+`ReportOutbox` and `YouTrackSubmitter` are the new pieces. **63 tests passing.** The outbox's tests care
+mostly about what it refuses to do: duplicate cards, retry a permanent rejection forever, drop reports
+when the daily limit is hit, grow without bound, or let one corrupt bundle break the queue.
+
+Two decisions inside worth knowing:
+
+- **Attachment restriction is a second call**, because the multipart upload cannot carry a visibility
+  object. If it fails, the attachment is **deleted** rather than left unrestricted — failing to attach is
+  a far smaller problem than exposing a dump containing a user's book text.
+- **The card says how old the report is** and how many times the problem happened, so a report filed
+  three weeks late cannot read as though it were fresh, and Bloom's version is labelled as its version
+  *at the time*.
+
+**Next, in order:** the remaining collectors (wait chains, CDP renderer-responsiveness probe, Bloom log
+tail, event log and WER, system stats, network probe) — porting `spike/Probe` rather than rewriting;
+then wiring the watcher, gatherer and outbox together into the actual `BloomFreezeDoctor.exe` with the
+status window (§2.1) and the rendezvous (§6); then the Velopack packaging and the GHA release with
+signing (D7's recipe is in the plan). After that, the Bloom-side changes on `BL-16719-Freeze-Doctor`,
+heartbeat first.
