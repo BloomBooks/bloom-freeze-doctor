@@ -40,6 +40,43 @@ public sealed class WindowsTargetProbe : ITargetProbe
     public bool EverDebugged => _everDebugged;
 
     /// <summary>
+    /// The exit code, once the process has gone. Available only because we have held a handle to it since
+    /// before it died — which is the whole reason the Doctor wants to be running *before* the trouble
+    /// starts. Returns false while it is still running, or if we never had the right to ask.
+    /// </summary>
+    public bool TryGetExitCode(out int exitCode)
+    {
+        exitCode = 0;
+        try
+        {
+            if (!_process.HasExited)
+                return false;
+            exitCode = _process.ExitCode;
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>When the process exited, if we saw it happen.</summary>
+    public DateTime? ExitedAt
+    {
+        get
+        {
+            try
+            {
+                return _process.HasExited ? _process.ExitTime : null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
     /// The window we consider Bloom's main window: visible, top-level, owned by this process, and the
     /// largest such — chosen explicitly rather than trusting <c>Process.MainWindowHandle</c>, which
     /// picks the first visible top-level window it happens to find. A healthy Bloom keeps a second,

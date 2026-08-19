@@ -147,12 +147,11 @@ public static class ExitClassifier
                 "this Bloom had been under a debugger, so its exit tells us nothing"
             );
 
-        if (evidence.NeverFile)
-            return Conclude(
-                ClassifyWithoutPolicy(evidence).Verdict,
-                false,
-                "a developer or automation run; gathered but never filed"
-            );
+        // NOTE what is deliberately NOT here: a check on NeverFile. Whether a report may be *filed* is a
+        // different question from whether this exit is worth reporting on, and it is settled elsewhere — the
+        // freeze path has always gathered a developer run's evidence to disk while declining to file it, and
+        // this path used to fold the two together and so gathered nothing at all, while logging that it had.
+        // One axis per question.
 
         // Bloom's own forced exit identifies itself in the log, and is worth a card in either regime.
         if (evidence.LogShowsForcedShutdown)
@@ -211,21 +210,6 @@ public static class ExitClassifier
             false,
             ExplainQuietPhase1(evidence)
         );
-    }
-
-    /// <summary>
-    /// The verdict alone, ignoring whether we are allowed to file it. Used when a run is one we never
-    /// file but we still want the local record to say what happened.
-    /// </summary>
-    private static ExitConclusion ClassifyWithoutPolicy(ExitEvidence evidence)
-    {
-        if (evidence.LogShowsForcedShutdown)
-            return Conclude(ExitVerdict.ForcedAfterStalledShutdown, false, "");
-        if (evidence.CleanExitProofPresent == true)
-            return Conclude(ExitVerdict.Clean, false, "");
-        return DescribeCrashSignals(evidence).Count > 0
-            ? Conclude(ExitVerdict.Crashed, false, "")
-            : Conclude(ExitVerdict.NoOrderlyShutdown, false, "");
     }
 
     private static List<string> DescribeCrashSignals(ExitEvidence evidence)

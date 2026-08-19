@@ -53,6 +53,29 @@ public sealed class DoctorSupervisor : IDisposable
     // would freeze its own window while diagnosing a freeze.
     private System.Threading.Timer? _discovery;
     private System.Threading.Timer? _drain;
+
+    /// <summary>Processes whose crash dump we have already started, so one crash produces one dump.</summary>
+    private readonly HashSet<int> _dumpsRequested = new();
+
+    /// <summary>Zombies whose evidence has been gathered, and which may therefore be ended.</summary>
+    private readonly HashSet<int> _zombiesReported = new();
+
+    /// <summary>Zombies we have already tried to end, so we do not keep hammering at one.</summary>
+    private readonly HashSet<int> _zombiesEnded = new();
+
+    /// <summary>Exits we have already examined, so one death produces one examination.</summary>
+    private readonly HashSet<int> _exitsExamined = new();
+
+    /// <summary>
+    /// How many gathers or examinations are in flight. The Doctor must not decide it has nothing left to do
+    /// while it is still busy — which is exactly what happened before this existed: a Bloom would crash, the
+    /// Doctor would notice the process was gone, conclude there was nothing left to watch, and exit,
+    /// cancelling the examination of the very crash it had just seen.
+    /// </summary>
+    private int _workInFlight;
+
+    /// <summary>Set by `--never-end-zombies`, for anyone who would rather we only ever observed.</summary>
+    private readonly bool _neverEndZombies;
     private DateTimeOffset? _lastBloomSeenAt;
     private string? _lastEvent;
 
@@ -73,14 +96,19 @@ public sealed class DoctorSupervisor : IDisposable
         string project = "BL",
         string targetProcessName = "Bloom",
         bool forceFiling = false,
-        ReportOutbox? outbox = null
+        ReportOutbox? outbox = null,
+        bool neverEndZombies = false
     )
     {
         _project = project;
         _targetProcessName = targetProcessName;
         _forceFiling = forceFiling;
         _outbox = outbox ?? new ReportOutbox();
+        _neverEndZombies = neverEndZombies;
     }
+
+    /// <summary>Raised after an attempt to end a stuck Bloom, so the window can say what happened.</summary>
+    public event EventHandler<ZombieEndOutcome>? ZombieEnded;
 
     /// <summary>Raised whenever the status changes, so the window can redraw. Fires on a background thread.</summary>
     public event EventHandler<DoctorStatus>? StatusChanged;
@@ -211,9 +239,16 @@ public sealed class DoctorSupervisor : IDisposable
                 return;
             }
 
-            var watcher = new BloomTargetWatcher(facts, new WindowsTargetProbe(process));
+            var probe = new WindowsTargetProbe(process);
+            var watcher = new BloomTargetWatcher(facts, probe);
             watcher.ReportWanted += OnReportWanted;
-            watcher.Observed += (_, _) => PublishStatus();
+            watcher.Observed += (_, verdict) =>
+            {
+                PublishStatus();
+                RespondToACrashingBloom(watcher);
+                ConsiderEndingAZombie(watcher, verdict);
+                ConsiderReportingAnExit(watcher, probe, verdict);
+            };
             _watchers[facts.ProcessId] = watcher;
             watcher.Start();
             Note($"watching Bloom {facts.ProcessId} ({facts.Channel})");
@@ -226,6 +261,7 @@ public sealed class DoctorSupervisor : IDisposable
     /// </summary>
     private void OnReportWanted(object? sender, ReportWantedEventArgs e)
     {
+        Interlocked.Increment(ref _workInFlight);
         _ = Task.Run(async () =>
         {
             try
@@ -244,6 +280,11 @@ public sealed class DoctorSupervisor : IDisposable
             catch (Exception ex)
             {
                 Note($"gathering failed: {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _workInFlight);
+                ConsiderExiting();
             }
         });
     }
@@ -264,6 +305,11 @@ public sealed class DoctorSupervisor : IDisposable
             .ConfigureAwait(false);
 
         var bundle = _outbox.Enqueue(report, _project, facts.Channel, verdict.Report.ToString());
+        // Ending a zombie is only allowed once its evidence is safely on disk, so this is the moment that
+        // unlocks it.
+        if (verdict.Report == ReportReason.Zombie)
+            lock (_lock)
+                _zombiesReported.Add(facts.ProcessId);
         Note(
             report.MayFile
                 ? $"report queued ({report.Summary})"
@@ -281,6 +327,229 @@ public sealed class DoctorSupervisor : IDisposable
             .FirstOrDefault(b => b.Directory == bundle.Directory)
             ?.Metadata.IssueId;
     }
+
+    /// <summary>
+    /// A Bloom has gone. Works out whether its going was worth reporting — plan state 2, the crash that
+    /// tells nobody.
+    ///
+    /// The detector deliberately refuses to judge this, because the answer depends on evidence gathered
+    /// after the fact: the exit code (which we only have because we held a handle since before it died),
+    /// Windows' own crash records, and whether Bloom left proof of an orderly shutdown. All of that is
+    /// <see cref="ExitClassifier"/>'s business; this supplies it and acts on the verdict.
+    /// </summary>
+    private void ConsiderReportingAnExit(
+        BloomTargetWatcher watcher,
+        WindowsTargetProbe probe,
+        DetectorVerdict verdict
+    )
+    {
+        try
+        {
+            if (verdict.State != TargetState.Exited)
+                return;
+            if (!_exitsExamined.Add(watcher.Target.ProcessId))
+                return; // one examination per process
+            Note($"Bloom {watcher.Target.ProcessId} has gone; examining why");
+
+            Interlocked.Increment(ref _workInFlight);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var session = Contract.DoctorSessionStore.TryRead(watcher.Target.ProcessId);
+                    probe.TryGetExitCode(out var exitCode);
+                    var diedAt = probe.ExitedAt ?? DateTime.Now;
+
+                    var evidence = new WindowsExitEvidenceCollector().Collect(
+                        watcher.Target.ProcessId,
+                        diedAt,
+                        watcher.Target.StartTime,
+                        session?.LogPath,
+                        probe.TryGetExitCode(out var code) ? code : (int?)null,
+                        watcher.IsPoisonedByDebugger,
+                        watcher.Target.NeverFile,
+                        // A session file with no exit record is the absence of proof that section 3.5 treats
+                        // as evidence — but only when Bloom was capable of leaving one. No session file at
+                        // all means an older Bloom, where absence means nothing.
+                        cleanExitProofPresent: session == null ? null : session.Exit != null,
+                        shutdownPhaseReached: session?.Exit?.ShutdownPhase
+                    );
+
+                    // Bloom telling us it already reported the problem outranks everything: a second card
+                    // about the same trouble is noise.
+                    if (session?.Exit?.BloomAlreadyReported == true)
+                    {
+                        Note(
+                            $"Bloom {watcher.Target.ProcessId} exited having already reported the problem "
+                                + $"itself ({session.Exit.ReportedId}); saying nothing"
+                        );
+                        return;
+                    }
+
+                    // Which regime to judge by depends on whether this Bloom could leave proof at all.
+                    var policy =
+                        session == null
+                            ? ExitReportPolicy.RequiresCorroboratingEvidence
+                            : ExitReportPolicy.RequiresProofOfCleanExit;
+                    var conclusion = ExitClassifier.Classify(evidence, policy);
+
+                    Note(
+                        $"Bloom {watcher.Target.ProcessId} exited: {conclusion.Verdict} — {conclusion.Explanation}"
+                    );
+                    if (!conclusion.ShouldReport)
+                        return;
+
+                    await GatherFileAndRecordAsync(
+                            watcher.Target,
+                            new DetectorVerdict
+                            {
+                                State = TargetState.Exited,
+                                Report = ReportReason.ExitedWithoutProof,
+                                Explanation = conclusion.Explanation,
+                            },
+                            mayFile: !watcher.IsPoisonedByDebugger && !watcher.Target.NeverFile,
+                            _stopping.Token
+                        )
+                        .ConfigureAwait(false);
+                }
+                catch (Exception e)
+                {
+                    Note($"could not examine an exit: {e.GetType().Name}: {e.Message}");
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _workInFlight);
+                    ConsiderExiting();
+                }
+            });
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>
+    /// Bloom is crashing and has asked to be dumped while it still exists. This is the one time the Doctor
+    /// has to be quick: Bloom is holding its own death open for about three seconds waiting for us.
+    /// </summary>
+    private void RespondToACrashingBloom(BloomTargetWatcher watcher)
+    {
+        try
+        {
+            if (!watcher.DumpRequested() || !_dumpsRequested.Add(watcher.Target.ProcessId))
+                return;
+
+            Note($"Bloom {watcher.Target.ProcessId} is crashing and asked for a dump");
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // Gather with the crash verdict, then tell Bloom it may go. Signalling completion is not
+                    // in a finally by accident: if the dump failed there is nothing to wait for either, so
+                    // Bloom should be released regardless.
+                    await GatherFileAndRecordAsync(
+                            watcher.Target,
+                            new DetectorVerdict
+                            {
+                                State = TargetState.Exited,
+                                Report = ReportReason.ExitedWithoutProof,
+                                Explanation =
+                                    "Bloom was crashing and asked to be dumped before it died",
+                            },
+                            mayFile: !watcher.IsPoisonedByDebugger && !watcher.Target.NeverFile,
+                            _stopping.Token
+                        )
+                        .ConfigureAwait(false);
+                }
+                catch (Exception e)
+                {
+                    Note($"could not dump the crashing Bloom: {e.GetType().Name}");
+                }
+                finally
+                {
+                    watcher.SignalDumpComplete();
+                }
+            });
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>
+    /// Considers ending a Bloom whose UI is gone but whose process lingers, holding the single-instance
+    /// token that stops the user starting Bloom again. All the judgement is in <see cref="ZombieEnder"/> so
+    /// that it can be tested; this only supplies the facts and acts on the answer.
+    /// </summary>
+    private void ConsiderEndingAZombie(BloomTargetWatcher watcher, DetectorVerdict verdict)
+    {
+        try
+        {
+            if (verdict.State != TargetState.Zombie || watcher.ZombieSince == null)
+                return;
+            if (!_zombiesReported.Contains(watcher.Target.ProcessId))
+                return; // the evidence has to be safely gathered first
+            if (!_zombiesEnded.Add(watcher.Target.ProcessId))
+                return; // one attempt per process; we do not keep hammering at it
+
+            var decision = ZombieEnder.Decide(
+                new ZombieDecisionFacts
+                {
+                    State = verdict.State,
+                    ReportGathered = true,
+                    SinceDetected = DateTimeOffset.UtcNow - watcher.ZombieSince.Value,
+                    EverDebugged = watcher.IsPoisonedByDebugger,
+                    WorkInProgress = LooksLikeWorkInProgress(watcher.Target.ProcessId),
+                    DisabledBySetting = _neverEndZombies,
+                }
+            );
+
+            if (!decision.ShouldEnd)
+            {
+                // Put the ticket back: the reason may be temporary (the grace period, or a save in
+                // progress), and we should look again next tick rather than never.
+                _zombiesEnded.Remove(watcher.Target.ProcessId);
+                return;
+            }
+
+            Note($"ending stuck Bloom {watcher.Target.ProcessId}: {decision.Explanation}");
+            _ = Task.Run(() =>
+            {
+                var outcome = ZombieEnder.End(watcher.Target.ProcessId);
+                Note($"stuck Bloom {watcher.Target.ProcessId}: {Describe(outcome)}");
+                ZombieEnded?.Invoke(this, outcome);
+            });
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>
+    /// Whether Bloom says it is in the middle of something we should not interrupt. Reads what Bloom
+    /// published; a Bloom that publishes nothing gives no reason to wait, and its UI is gone anyway.
+    /// </summary>
+    private static bool LooksLikeWorkInProgress(int processId)
+    {
+        try
+        {
+            if (!Contract.DoctorChannelReader.TryRead(processId, out var state) || state == null)
+                return false;
+            if (state.LongOperationInProgress)
+                return true;
+            var activity = state.Activity ?? "";
+            return activity.Contains("sav", StringComparison.OrdinalIgnoreCase)
+                || activity.Contains("publish", StringComparison.OrdinalIgnoreCase)
+                || activity.Contains("upload", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static string Describe(ZombieEndOutcome outcome) =>
+        outcome switch
+        {
+            ZombieEndOutcome.ExitedOnRequest => "it exited when asked, releasing the token properly",
+            ZombieEndOutcome.Killed => "it had to be killed; the token is released either way",
+            ZombieEndOutcome.AlreadyGone => "it had already gone",
+            _ => "it could not be ended; the user may need to restart the machine",
+        };
 
     private async Task DrainAsync(CancellationToken cancellation)
     {
@@ -309,6 +578,11 @@ public sealed class DoctorSupervisor : IDisposable
     /// </summary>
     private void ConsiderExiting()
     {
+        // Never quit mid-job. Gathering a report takes tens of seconds, and the moment we most want to be
+        // patient is right after a Bloom has died — which is also the moment we have least left to watch.
+        if (Volatile.Read(ref _workInFlight) > 0)
+            return;
+
         lock (_lock)
         {
             if (_watchers.Count > 0)
@@ -371,7 +645,7 @@ public sealed class DoctorSupervisor : IDisposable
     private void Note(string message)
     {
         _lastEvent = $"{DateTime.Now:HH:mm:ss}  {message}";
-        Debug.WriteLine("[FreezeDoctor] " + message);
+        DoctorLog.Write(message);
         PublishStatus();
     }
 

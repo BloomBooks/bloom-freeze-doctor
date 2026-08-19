@@ -171,8 +171,13 @@ public class ExitClassifierTests
     }
 
     [Test]
-    public void A_developer_or_automation_run_is_recorded_but_not_filed()
+    public void A_developer_run_still_gets_a_report_gathered_even_though_it_is_never_filed()
     {
+        // These are two separate questions, and conflating them was a real bug: this classifier used to
+        // answer "do not report" for a developer run, so the supervisor gathered nothing at all — while
+        // logging that it had gathered and merely declined to file. The freeze path had always got this
+        // right, gathering to disk and refusing to file, and now both paths agree. Whether a report may be
+        // FILED is settled by the caller; this only answers whether the exit is worth reporting on.
         var conclusion = ExitClassifier.Classify(
             new ExitEvidence
             {
@@ -182,13 +187,12 @@ public class ExitClassifierTests
             Phase1
         );
 
+        Assert.That(conclusion.Verdict, Is.EqualTo(ExitVerdict.Crashed));
         Assert.That(
-            conclusion.Verdict,
-            Is.EqualTo(ExitVerdict.Crashed),
-            "the local record should still say what happened"
+            conclusion.ShouldReport,
+            Is.True,
+            "a crash is worth gathering evidence about even when we will not file it"
         );
-        Assert.That(conclusion.ShouldReport, Is.False);
-        Assert.That(conclusion.Explanation, Does.Contain("never filed"));
     }
 
     [Test]

@@ -60,6 +60,12 @@ public sealed class BloomTargetWatcher : IDisposable
     private readonly TimeSpan _cadence;
     private Timer? _timer;
 
+    /// <summary>
+    /// Held open for as long as we watch, so Bloom can tell instantly whether anyone is listening before it
+    /// pauses a crash to ask for a dump.
+    /// </summary>
+    private EventWaitHandle? _watchingSignal;
+
     /// <summary>Guards against a slow reading overlapping the next tick.</summary>
     private int _observing;
 
@@ -95,8 +101,42 @@ public sealed class BloomTargetWatcher : IDisposable
     /// <summary>Begins watching.</summary>
     public void Start()
     {
+        // Announce that we are watching this Bloom, so that Bloom can find out with a zero timeout whether
+        // it is worth pausing a crash to ask us for a dump. Held open for as long as we watch.
+        _watchingSignal ??= Contract.DoctorSignals.TryCreate(
+            Contract.DoctorSignals.WatchingName(Target.ProcessId)
+        );
         _timer ??= new Timer(_ => Tick(), null, TimeSpan.Zero, _cadence);
     }
+
+    /// <summary>
+    /// True if Bloom has asked us to dump it because it is crashing. Checked on each tick rather than from a
+    /// dedicated thread: Bloom waits about three seconds, so a once-a-second check is quick enough, and a
+    /// thread per watched Bloom is a cost with no return.
+    /// </summary>
+    public bool DumpRequested()
+    {
+        try
+        {
+            using var request = Contract.DoctorSignals.TryOpen(
+                Contract.DoctorSignals.DumpRequestName(Target.ProcessId)
+            );
+            return request != null && request.WaitOne(TimeSpan.Zero);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Tells Bloom the dump is done, so it can stop waiting and get on with dying.</summary>
+    public void SignalDumpComplete() =>
+        Contract.DoctorSignals.TrySignal(
+            Contract.DoctorSignals.DumpCompleteName(Target.ProcessId)
+        );
+
+    /// <summary>When this target was first judged a zombie, for the grace period in <see cref="ZombieEnder"/>.</summary>
+    public DateTimeOffset? ZombieSince { get; private set; }
 
     /// <summary>
     /// Takes one reading and acts on it. Public so a test can drive the watcher deterministically
@@ -112,6 +152,13 @@ public sealed class BloomTargetWatcher : IDisposable
             var observation = _probe.Observe(_monotonic.Elapsed);
             var verdict = _detector.Observe(observation);
             Observed?.Invoke(this, verdict);
+
+            // Remember when the zombie state began, so the grace period in ZombieEnder measures from the
+            // right moment rather than from whenever someone got round to asking.
+            if (verdict.State == TargetState.Zombie)
+                ZombieSince ??= DateTimeOffset.UtcNow;
+            else
+                ZombieSince = null;
 
             if (!verdict.ShouldReport)
                 return;
@@ -172,6 +219,10 @@ public sealed class BloomTargetWatcher : IDisposable
     {
         _timer?.Dispose();
         _timer = null;
+        // Closing this is how Bloom learns nobody is watching any more, so it stops pausing its crashes for
+        // an answer that is not coming.
+        _watchingSignal?.Dispose();
+        _watchingSignal = null;
     }
 
     /// <summary>
