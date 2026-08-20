@@ -34,6 +34,27 @@ jobs:
               # release rather than merely be noted.
               run: dotnet test --configuration Release --no-build --verbosity normal
 
+            # The shared contract, packed as a NuGet package so BloomDesktop can reference it instead
+            # of keeping its own copy of the same 750 lines. See src/BloomFreezeDoctor.Contract.
+            #
+            # THERE IS DELIBERATELY NO PUSH STEP. A push to nuget.org cannot be undone: a version is
+            # permanent and the package id is claimed for good. So this only produces the package and
+            # keeps it as a build artifact, which is enough to review the shape of it and to prove it
+            # packs on every build. Publishing - and taking the version from the tag rather than from
+            # the csproj, so releases line up - is a separate, later change, made once we have decided
+            # to go ahead. Until then BloomDesktop still holds copies, guarded by a drift check.
+            - name: Pack the shared contract package (artifact only, never pushed)
+              run: >
+                  dotnet pack src/BloomFreezeDoctor.Contract/BloomFreezeDoctor.Contract.csproj
+                  --configuration Release
+                  --output nuget-package
+
+            - name: Keep the contract package for inspection
+              uses: actions/upload-artifact@v4
+              with:
+                  name: contract-package
+                  path: nuget-package/*
+
             - name: Publish the Doctor
               run: >
                   dotnet publish src/BloomFreezeDoctor/BloomFreezeDoctor.csproj

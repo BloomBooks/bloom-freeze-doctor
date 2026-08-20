@@ -1,0 +1,72 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The contract between Bloom and the Freeze Doctor: the shared-memory layout, the session file, and
+    the named events. Nothing else — no detection logic, no Windows probing, no reports.
+
+    IT IS ITS OWN PROJECT SO THAT IT CAN BE ITS OWN PACKAGE. Both programs have to agree about this
+    wire format exactly, and until now they agreed by holding two hand-maintained copies of the same
+    750 lines. They drifted. Publishing one assembly and letting BloomDesktop reference it makes
+    agreement structural instead of clerical.
+
+    Deliberately kept dependency-free. Every type here uses only the BCL (MemoryMappedFiles,
+    System.Text.Json, IO, Threading), so a consumer takes on no transitive dependencies at all by
+    referencing it — which is what makes it a reasonable thing to add to Bloom.
+
+    NOTHING IS PUBLISHED YET. `dotnet pack` produces the package and CI keeps it as a build artifact,
+    so the shape can be reviewed, but there is no push step: a push to nuget.org cannot be undone.
+    See PLAN.md and BL-16719.
+  -->
+  <PropertyGroup>
+    <!--
+      net8.0-windows, not net8.0. The named kernel objects this uses (a named EventWaitHandle, a
+      memory-mapped file in the Local\ namespace) are annotated as Windows-only in .NET, so a plain
+      net8.0 target reports every use as a platform warning — and this project treats warnings as
+      errors. Both consumers are net8.0-windows, and the Doctor is a Windows tool, so nothing is lost
+      by being honest about it.
+    -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>BloomFreezeDoctor.Contract</RootNamespace>
+    <AssemblyName>BloomFreezeDoctor.Contract</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!--
+      No PlatformTarget: unlike the Doctor's own executable this is AnyCPU on purpose, so a consumer
+      decides its own bitness. Bloom is x64; pinning x64 here would only get in the way if that ever
+      changed.
+    -->
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!--
+      Package identity. PROVISIONAL — a package id on nuget.org is claimed permanently, so this is
+      one of the things to settle before anything is pushed. Named to match the assembly, and without
+      a `SIL.` prefix on purpose: reserved prefixes on nuget.org need the reservation holder's
+      involvement, which is a coordination question rather than a technical one.
+    -->
+    <PackageId>BloomFreezeDoctor.Contract</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Authors>SIL Global</Authors>
+    <Company>SIL Global</Company>
+    <Description>
+      The shared contract between Bloom and the Bloom Freeze Doctor: the shared-memory health page,
+      the session file, and the named events they use to reach each other. Referenced by both sides so
+      that one wire format has one definition.
+    </Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/BloomBooks/bloom-freeze-doctor</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/BloomBooks/bloom-freeze-doctor</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- So a stack trace from a consumer can be read against this source. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
