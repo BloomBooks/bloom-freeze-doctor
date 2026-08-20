@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using BloomFreezeDoctor.Outbox;
+using Velopack;
 
 namespace BloomFreezeDoctor;
 
@@ -18,6 +19,17 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // FIRST, before anything else whatsoever. Velopack runs this same exe with its own hook
+        // arguments at install, update and uninstall time, and Run() is what recognizes those, does the
+        // hook's work, and exits the process. Everything below would get in the way of that: the
+        // command-line parser does not know Velopack's switches, the queue-inspection switches return
+        // early, and the singleton mutex would make an install hook exit as "another Doctor is already
+        // running" during an update - when the Doctor genuinely IS running and is being replaced.
+        //
+        // `vpk pack` refuses to build an installer at all if it cannot find this call, which is how its
+        // absence surfaced.
+        VelopackApp.Build().Run();
+
         var options = CommandLineOptions.Parse(args);
 
         // The queue-inspection switches are for support and for testing, and must work whether or not
