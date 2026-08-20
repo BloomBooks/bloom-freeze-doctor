@@ -66,11 +66,15 @@ jobs:
             - name: Read the version from the tag
               id: version
               shell: pwsh
-              # A tag build releases its tag; anything else builds a 0.0.0 package that is never released,
-              # so the packaging step is exercised on every push rather than only when we tag.
+              # A tag build releases its tag; anything else builds a throwaway package that is never
+              # released, so the packaging step is exercised on every push rather than only when we tag.
+              #
+              # The placeholder is 0.0.1, not 0.0.0: Velopack rejects 0.0.0 outright ("it must be
+              # >= 0.0.1") and fails the pack step. Nothing had ever caught that, because signing ran
+              # first and failed first, so this branch of the version logic had never once executed.
               run: |
                   $tag = "${{ github.ref_name }}"
-                  $version = if ($tag -match '^v(\d+\.\d+\.\d+)$') { $Matches[1] } else { "0.0.0" }
+                  $version = if ($tag -match '^v(\d+\.\d+\.\d+)$') { $Matches[1] } else { "0.0.1" }
                   "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
                   Write-Host "packaging version $version"
 
