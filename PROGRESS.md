@@ -286,3 +286,50 @@ an MSB3027 that reads as a mystery), and prints the exe's timestamp so staleness
 Velopack packaging and the signed release workflow. The **6.4 backport in §9.1 is deliberately on hold**
 until 6.5 has had field testing — John's call, and the right one: backporting a heartbeat we have only
 ever seen work on our own machines would be premature.
+
+## Day 4 — zombie-ending, the handshake, and a preflight round that earned its keep
+
+The zombie-ending path and the dump handshake are done, and the Bloom side went through `preflight`
+(PR [#8218](https://github.com/BloomBooks/BloomDesktop/pull/8218), still draft).
+
+**Note on commit `ab27289` in this repo.** Its message describes only the seqlock parity fix, but it
+actually carried the whole mirror of that round: the `DoctorSession` changes (the already-reported flag
+living on the session rather than inside `Exit`, and pruning treating a Doctor-forced exit as *unexplained*
+so the zombie evidence survives), a `BloomTargetWatcher` and `DoctorSupervisor` touch, and the matching
+tests. Those had been sitting uncommitted while the Bloom side was being worked; `git add -A` swept them
+in. The code is right and tested — the message just understates it. Recorded here rather than rewriting
+pushed history.
+
+**Two bugs worth remembering, because they are the same bug twice.** Both were in how Bloom describes what
+it is doing, and both were found by review rather than by testing:
+
+1. The activity line has now been got wrong **three times in three ways**, and the two failure directions
+   are opposites: the refresh overwrote what Bloom stated; then "starting up" was written straight to the
+   shared page so there was nothing to carry forward; then it was carried forward for ever and described an
+   idle Bloom hours later. Any fix for one direction walks straight into the other. It is now a pure
+   `Compose(stated, request, hasHandledARequest)` with both directions pinned by a test — and the first
+   version of *that* test was itself unsound, asserting whichever outcome the ambient static state produced.
+2. The seqlock counter has now silently disabled the channel **twice** — first the non-atomic increment
+   (fixed by `_writeLock`), then an increment placed outside the inner `try`, where one throw inverted the
+   parity for the rest of the run. Readers then treat every resting value as "write in progress" and give
+   up, so the Doctor falls back to watching from outside, which is blind to the exact freeze this exists to
+   catch, with nothing saying why. **The lesson both times: this invariant was being held up by careful
+   statement ordering, which is fragile in proportion to how badly it fails.** It is now restored in a
+   `finally` from whatever value was actually reached, so no ordering of failures can leave it odd.
+
+**One real gap left open, deliberately.** Nothing in Bloom calls `SetLongOperation`, so
+`LongOperationInProgress` is permanently false and the Doctor's five-minute grace for legitimately slow
+work **does not exist** — every freeze is judged at one minute. Work behind a modal progress dialog is
+safe either way (`ShowDialog` pumps messages, so the heartbeat keeps ticking), but anything that blocks the
+UI thread for over a minute without pumping would be filed as a freeze. Which operations to mark cannot be
+inferred: "a request has run for a minute" is the *same signal* as the freeze itself. So it is left unwired
+with the cost written up at the method, and raised with John as the open decision on the PR.
+
+**Also:** the freeze simulator now works on **Alpha** as well as developer builds, on John's call —
+reproducing a freeze usually means working with somebody who is actually experiencing one, and those people
+run Alpha, not a build from source.
+
+**On the two "byte-identical" contract files:** they are identical in substance but *not* literally
+byte-for-byte, because BloomDesktop's csharpier pre-commit hook wraps three lines more narrowly than this
+repo's formatting. Worth knowing before anyone tries to enforce byte-equality mechanically; the pinned
+layout tests in both repos are the real drift guard.
