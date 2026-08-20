@@ -1,14 +1,10 @@
-// Explicit usings and nullable context: copied into BloomDesktop. See DoctorChannel.cs.
-#nullable enable
 using System;
 using System.Threading;
 
 namespace BloomFreezeDoctor.Contract;
 
 // =====================================================================================================
-//  THIRD PART OF THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR. COPIED INTO BOTH REPOS.
-//
-//  Source of truth: BloomBooks/bloom-freeze-doctor, src/BloomFreezeDoctor.Core/Contract/DoctorSignals.cs
+//  THIRD PART OF THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR.
 //
 //  Shared memory lets the Doctor watch. These named events let the two actually ask each other for
 //  something, in the two cases where waiting is worth it:

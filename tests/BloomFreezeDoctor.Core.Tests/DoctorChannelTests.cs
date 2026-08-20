@@ -6,11 +6,16 @@ namespace BloomFreezeDoctor.Tests;
 /// <summary>
 /// Tests for the shared-memory contract between Bloom and the Doctor.
 ///
-/// **This file is a guard against silent drift.** The same source file lives in BloomDesktop, and if the
-/// two copies disagree about the layout, nothing fails loudly — Bloom publishes to one set of offsets and
-/// the Doctor reads another, producing reports full of plausible nonsense. So the offsets and the schema
-/// version are pinned here by value, and the equivalent test in BloomDesktop pins the same numbers.
-/// Changing the layout should therefore break two builds, which is the intended amount of friction.
+/// **The layout is pinned here BY VALUE, on purpose.** There is one definition of it now — this project,
+/// which BloomDesktop references as a package — so the two sides can no longer hold copies that disagree.
+/// What they can still do is get out of step over a *version*: this repo changes the layout, Bloom carries
+/// on referencing the version before it, and the mismatch shows up as reports full of plausible nonsense
+/// rather than as an error, because Bloom publishes to one set of offsets and the Doctor reads another.
+///
+/// Pinning the numbers means changing the layout has to be deliberate here, and BloomDesktop's own test
+/// pins the layout it was compiled against — so Bloom's build fails rather than Bloom quietly publishing
+/// to the wrong place. If you are changing the layout, bump SchemaVersion, update these numbers, and
+/// expect to update Bloom's side too.
 /// </summary>
 [TestFixture]
 public class DoctorChannelTests
@@ -21,8 +26,9 @@ public class DoctorChannelTests
     [Test]
     public void The_layout_is_pinned_so_a_change_cannot_pass_unnoticed()
     {
-        // If you are here because this test failed: the layout changed. Bump SchemaVersion, update the
-        // copy of DoctorChannel.cs in BloomDesktop, and update both repos' pinned numbers.
+        // If you are here because this test failed: the layout changed. Bump SchemaVersion, update these
+        // numbers, and publish a version Bloom can move up to — Bloom's own pinned test will fail until
+        // its side is updated to match, which is the point.
         Assert.Multiple(() =>
         {
             Assert.That(DoctorChannelLayout.SchemaVersion, Is.EqualTo(1), "schema version");

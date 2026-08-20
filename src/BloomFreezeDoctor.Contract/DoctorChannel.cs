@@ -1,8 +1,3 @@
-// Explicit usings and an explicit nullable context, rather than relying on the project's settings.
-// This file is copied into BloomDesktop, which has neither ImplicitUsings nor nullable enabled, so
-// depending on them would mean the copy had to be edited on the way in — and a file that has to be
-// edited on the way in is a file that will drift.
-#nullable enable
 using System;
 using System.IO;
 using System.IO.MemoryMappedFiles;
@@ -11,20 +6,17 @@ using System.Text;
 namespace BloomFreezeDoctor.Contract;
 
 // =====================================================================================================
-//  THIS FILE IS THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR, AND IT IS COPIED INTO BOTH REPOS.
+//  THIS FILE IS THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR.
 //
-//  Source of truth: BloomBooks/bloom-freeze-doctor, src/BloomFreezeDoctor.Core/Contract/DoctorChannel.cs
-//  The two copies must agree on everything except the namespace. They are NOT byte-identical: the two
-//  repos' formatters disagree about where to wrap a few long lines, so the comparison ignores
-//  whitespace. Two nets catch a drift: build/check-freeze-doctor-contract.sh compares the copies on
-//  every PR that touches them, and each repo has a test pinning SchemaVersion and the field offsets by
-//  value. Both exist because a drift here fails silently — Bloom writes one set of offsets, the Doctor
-//  reads another, and the resulting reports are confident and wrong.
+//  Both programs must agree about this layout exactly, so there is deliberately only ONE definition of
+//  it: this project is published as a NuGet package and BloomDesktop references it. It used to be a copy
+//  in each repository, and they drifted — which is a failure that shows up as confident, wrong reports
+//  rather than as an error, because Bloom writes one set of offsets and the Doctor reads another.
 //
-//  ALL OF THAT IS A WORKAROUND FOR THESE BEING COPIES AT ALL. The intended end state is to publish this
-//  as a NuGet package from the Doctor's repo and delete Bloom's copies, at which point the script goes
-//  too. It is not done yet because the format is still settling and a publish round-trip on every edit
-//  would cost more than it saves; the moment to do it is the Doctor's first packaged release.
+//  What still has to be done by hand is BUMPING SchemaVersion when the layout changes, and both sides
+//  pin it: the test in this repo asserts the version and offsets by value, and BloomDesktop has a test
+//  asserting the layout it was compiled against. So a version bump that Bloom has not caught up with
+//  fails Bloom's build rather than going quietly.
 //
 //  Why shared memory rather than a pipe, a socket, or Bloom's own web server: the Doctor has to be able
 //  to read this when Bloom is wedged. A request/response channel needs Bloom to be well enough to
