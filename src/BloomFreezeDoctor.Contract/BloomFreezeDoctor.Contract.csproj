@@ -40,10 +40,23 @@
 
   <PropertyGroup>
     <!--
-      Package identity. PROVISIONAL — a package id on nuget.org is claimed permanently, so this is
-      one of the things to settle before anything is pushed. Named to match the assembly, and without
-      a `SIL.` prefix on purpose: reserved prefixes on nuget.org need the reservation holder's
-      involvement, which is a coordination question rather than a technical one.
+      Package identity. Named to match the assembly, and without a `SIL.` prefix on purpose: reserved
+      prefixes on nuget.org need the reservation holder's involvement, which is a coordination
+      question rather than a technical one, and this needs no prefix to be unambiguous.
+
+      DECIDED (John, and this is the instruction for whoever wires up publishing): push to
+      **nuget.org, then unlist the version**. Unlisted means it does not appear in search or browse,
+      but still restores when a consumer pins an exact version — which Bloom does. So it is out of
+      sight without anybody needing feed credentials.
+
+      A private feed was considered and rejected for two reasons. It hides nothing, because this repo
+      is public MIT and the package is just a compiled copy of source anyone can already read. And it
+      would cost credentials on every developer machine, in TeamCity, and in GitHub Actions — for .NET,
+      GitHub Packages needs authentication even for public packages — which is precisely the
+      infrastructure whose absence made referencing this a cheap thing for Bloom to do at all.
+
+      Still true regardless: a version pushed to nuget.org cannot be deleted, and the id is claimed for
+      good. Hence review first.
     -->
     <PackageId>BloomFreezeDoctor.Contract</PackageId>
     <Version>0.1.0-alpha</Version>
