@@ -1,7 +1,7 @@
 using System;
 using System.Threading;
 
-namespace BloomFreezeDoctor.Contract;
+namespace BloomBooks.FreezeDoctor.Protocol;
 
 // =====================================================================================================
 //  THIRD PART OF THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR.

@@ -3,7 +3,7 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Text;
 
-namespace BloomFreezeDoctor.Contract;
+namespace BloomBooks.FreezeDoctor.Protocol;
 
 // =====================================================================================================
 //  THIS FILE IS THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR.

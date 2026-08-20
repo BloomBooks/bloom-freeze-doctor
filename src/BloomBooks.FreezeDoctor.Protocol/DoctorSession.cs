@@ -4,7 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace BloomFreezeDoctor.Contract;
+namespace BloomBooks.FreezeDoctor.Protocol;
 
 // =====================================================================================================
 //  SECOND HALF OF THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR.

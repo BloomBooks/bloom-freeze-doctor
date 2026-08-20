@@ -1,8 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    The contract between Bloom and the Freeze Doctor: the shared-memory layout, the session file, and
+    The protocol between Bloom and the Freeze Doctor: the shared-memory layout, the session file, and
     the named events. Nothing else — no detection logic, no Windows probing, no reports.
+
+    "Protocol" rather than "Contract" because it is more than shared data: alongside the layouts it
+    defines the kernel object naming scheme and the signalling handshakes (the Doctor announcing that it
+    is watching, asking a stuck Bloom to exit, the dump exchange). Those are conversation, not data.
 
     IT IS ITS OWN PROJECT SO THAT IT CAN BE ITS OWN PACKAGE. Both programs have to agree about this
     wire format exactly, and until now they agreed by holding two hand-maintained copies of the same
@@ -28,8 +32,8 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>BloomFreezeDoctor.Contract</RootNamespace>
-    <AssemblyName>BloomFreezeDoctor.Contract</AssemblyName>
+    <RootNamespace>BloomBooks.FreezeDoctor.Protocol</RootNamespace>
+    <AssemblyName>BloomBooks.FreezeDoctor.Protocol</AssemblyName>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <!--
       No PlatformTarget: unlike the Doctor's own executable this is AnyCPU on purpose, so a consumer
@@ -40,9 +44,10 @@
 
   <PropertyGroup>
     <!--
-      Package identity. Named to match the assembly, and without a `SIL.` prefix on purpose: reserved
-      prefixes on nuget.org need the reservation holder's involvement, which is a coordination
-      question rather than a technical one, and this needs no prefix to be unambiguous.
+      Package identity. The `BloomBooks.` prefix follows the house style already in use: the Velopack
+      fork at BloomBooks/velopack-l10n-fork publishes `BloomBooks.Velopack` and
+      `BloomBooks.Velopack.Cli`, which Bloom references the same way. Deliberately NOT a `SIL.` prefix,
+      which is likely a reserved prefix on nuget.org and would need the reservation holder involved.
 
       DECIDED (John, and this is the instruction for whoever wires up publishing): push to
       **nuget.org, then unlist the version**. Unlisted means it does not appear in search or browse,
@@ -55,17 +60,24 @@
       GitHub Packages needs authentication even for public packages — which is precisely the
       infrastructure whose absence made referencing this a cheap thing for Bloom to do at all.
 
+      The mechanics to copy are in that repo's .github/workflows/release.yml: `dotnet nuget push`
+      followed by `dotnet nuget delete`, which on nuget.org UNLISTS a version rather than removing it.
+      Note that pushing a brand-new package id needs an API key scoped to "Push new packages and
+      package versions" — their workflow carries a catch block saying exactly that, so they hit it.
+      The key is the `BLOOMBOOKS_NUGET` secret.
+
       Still true regardless: a version pushed to nuget.org cannot be deleted, and the id is claimed for
       good. Hence review first.
     -->
-    <PackageId>BloomFreezeDoctor.Contract</PackageId>
+    <PackageId>BloomBooks.FreezeDoctor.Protocol</PackageId>
     <Version>0.1.0-alpha</Version>
     <Authors>SIL Global</Authors>
     <Company>SIL Global</Company>
     <Description>
-      The shared contract between Bloom and the Bloom Freeze Doctor: the shared-memory health page,
-      the session file, and the named events they use to reach each other. Referenced by both sides so
-      that one wire format has one definition.
+      The protocol between Bloom and the Bloom Freeze Doctor: the shared-memory health page, the
+      session file, and the named events they use to reach each other. Referenced by both sides so that
+      one wire format has one definition. Published for Bloom's own use and unlisted; not intended as a
+      general-purpose library.
     </Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/BloomBooks/bloom-freeze-doctor</PackageProjectUrl>

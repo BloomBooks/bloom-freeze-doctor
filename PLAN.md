@@ -485,8 +485,10 @@ workers. So **the primary channel is not the web server, and not request/respons
   state 2 with no admin). But it **first probes Doctor liveness with a zero timeout and waits at most
   2–3 s** — those paths already do Sentry plus a message box, and an unconditional 10 s pause when no
   Doctor is running would just make every crash worse for the user.
-- **Contract drift** is prevented by one shared source file with a `SchemaVersion` plus a test in each
-  repo pinning the layout. (A tiny `BloomFreezeDoctor.Contract` NuGet later, if it earns it.)
+- **Protocol drift** is prevented structurally: there is one definition, published as the
+  `BloomBooks.FreezeDoctor.Protocol` package from this repo and referenced by BloomDesktop, plus a
+  `SchemaVersion` and a test in each repo pinning the layout by value. It began as a copied source file
+  in each repo; they drifted within two days, which is what earned the package. [rev9]
 
 ## 7. Packaging, repo, CI
 

@@ -1,5 +1,9 @@
 using System.Diagnostics;
 
+// Aliased rather than imported plainly, so uses below still read as Protocol.DoctorSignals - it is worth
+// saying at each use that this is the shared wire format, not something local to the Doctor.
+using Protocol = BloomBooks.FreezeDoctor.Protocol;
+
 namespace BloomFreezeDoctor;
 
 /// <summary>What the watcher knows about the Bloom it is watching, for the report's header.</summary>
@@ -103,8 +107,8 @@ public sealed class BloomTargetWatcher : IDisposable
     {
         // Announce that we are watching this Bloom, so that Bloom can find out with a zero timeout whether
         // it is worth pausing a crash to ask us for a dump. Held open for as long as we watch.
-        _watchingSignal ??= Contract.DoctorSignals.TryCreate(
-            Contract.DoctorSignals.WatchingName(Target.ProcessId)
+        _watchingSignal ??= Protocol.DoctorSignals.TryCreate(
+            Protocol.DoctorSignals.WatchingName(Target.ProcessId)
         );
         _timer ??= new Timer(_ => Tick(), null, TimeSpan.Zero, _cadence);
     }
@@ -118,8 +122,8 @@ public sealed class BloomTargetWatcher : IDisposable
     {
         try
         {
-            using var request = Contract.DoctorSignals.TryOpen(
-                Contract.DoctorSignals.DumpRequestName(Target.ProcessId)
+            using var request = Protocol.DoctorSignals.TryOpen(
+                Protocol.DoctorSignals.DumpRequestName(Target.ProcessId)
             );
             return request != null && request.WaitOne(TimeSpan.Zero);
         }
@@ -131,8 +135,8 @@ public sealed class BloomTargetWatcher : IDisposable
 
     /// <summary>Tells Bloom the dump is done, so it can stop waiting and get on with dying.</summary>
     public void SignalDumpComplete() =>
-        Contract.DoctorSignals.TrySignal(
-            Contract.DoctorSignals.DumpCompleteName(Target.ProcessId)
+        Protocol.DoctorSignals.TrySignal(
+            Protocol.DoctorSignals.DumpCompleteName(Target.ProcessId)
         );
 
     /// <summary>When this target was first judged a zombie, for the grace period in <see cref="ZombieEnder"/>.</summary>
@@ -203,7 +207,7 @@ public sealed class BloomTargetWatcher : IDisposable
     {
         try
         {
-            var session = Contract.DoctorSessionStore.TryRead(Target.ProcessId);
+            var session = Protocol.DoctorSessionStore.TryRead(Target.ProcessId);
             return session?.BloomAlreadyReported == true;
         }
         catch (Exception)

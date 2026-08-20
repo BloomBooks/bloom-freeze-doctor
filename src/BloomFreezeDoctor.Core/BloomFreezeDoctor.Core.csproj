@@ -18,9 +18,9 @@
   <ItemGroup>
     <!--
       The wire format Bloom and the Doctor share. Its own project because it is also published as its
-      own package, which is how BloomDesktop is meant to get it instead of keeping a copy.
+      own package, which is how BloomDesktop gets it instead of keeping a copy.
     -->
-    <ProjectReference Include="..\BloomFreezeDoctor.Contract\BloomFreezeDoctor.Contract.csproj" />
+    <ProjectReference Include="..\BloomBooks.FreezeDoctor.Protocol\BloomBooks.FreezeDoctor.Protocol.csproj" />
   </ItemGroup>
 
   <ItemGroup>

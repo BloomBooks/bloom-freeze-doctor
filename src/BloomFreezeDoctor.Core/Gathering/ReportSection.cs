@@ -1,3 +1,7 @@
+// Aliased rather than imported plainly, so uses below still read as Protocol.DoctorSession - it is worth
+// saying at each use that this is the shared wire format, not something local to the Doctor.
+using Protocol = BloomBooks.FreezeDoctor.Protocol;
+
 namespace BloomFreezeDoctor.Gathering;
 
 /// <summary>
@@ -69,13 +73,13 @@ public sealed record GatherContext
     /// What Bloom recorded about itself at startup, or null for a Bloom that publishes nothing — which is
     /// every Bloom in the field today, so nothing may depend on this being present.
     /// </summary>
-    public Contract.DoctorSession? Session { get; init; }
+    public Protocol.DoctorSession? Session { get; init; }
 
     /// <summary>
     /// The live state Bloom published at the moment we decided to gather: heartbeats, what it thought it was
     /// doing, its server's worker counts. Null for a Bloom that publishes nothing.
     /// </summary>
-    public Contract.DoctorChannelSnapshot? PublishedState { get; init; }
+    public Protocol.DoctorChannelSnapshot? PublishedState { get; init; }
 }
 
 /// <summary>

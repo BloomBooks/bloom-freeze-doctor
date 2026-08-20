@@ -2,6 +2,10 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
+// Aliased rather than imported plainly, so uses below still read as Protocol.DoctorSignals - it is worth
+// saying at each use that this is the shared wire format, not something local to the Doctor.
+using Protocol = BloomBooks.FreezeDoctor.Protocol;
+
 namespace BloomFreezeDoctor;
 
 /// <summary>
@@ -160,7 +164,7 @@ public sealed class WindowsTargetProbe : ITargetProbe
         TimeSpan StaleFor
     ) ReadPublishedState()
     {
-        if (!Contract.DoctorChannelReader.TryRead(_process.Id, out var snapshot) || snapshot == null)
+        if (!Protocol.DoctorChannelReader.TryRead(_process.Id, out var snapshot) || snapshot == null)
         {
             PublishedSnapshot = null;
             return (false, false, false, TimeSpan.Zero);
@@ -187,7 +191,7 @@ public sealed class WindowsTargetProbe : ITargetProbe
     /// The most recent state Bloom published, or null if it publishes none. Kept so the report can quote
     /// what Bloom said it was doing.
     /// </summary>
-    public Contract.DoctorChannelSnapshot? PublishedSnapshot { get; private set; }
+    public Protocol.DoctorChannelSnapshot? PublishedSnapshot { get; private set; }
 
     /// <summary>
     /// How old a heartbeat has to be before we call it stale. Bloom ticks every 500 ms, so this is ten
