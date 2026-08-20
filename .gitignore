@@ -7,7 +7,17 @@ obj/
 # The stub is driven by a command file written next to its exe; it is transient by design.
 freezestub-command.txt
 
-# Spike dumps and gathered reports never belong in the repo: they contain process memory.
+# Spike dumps never belong in the repo: they contain process memory.
 *.dmp
-reports/
-outbox/
+
+# Do NOT add unanchored directory patterns here. This file used to carry `outbox/` and `reports/`,
+# and git's ignore matching is case-INSENSITIVE on Windows (core.ignorecase defaults to true), so
+# `outbox/` also matched the source folder src/BloomFreezeDoctor.Core/Outbox/. The whole
+# report-queueing and YouTrack-filing layer was therefore never committed: `git status` stayed
+# clean, the build passed locally because the files were on disk, and every CI run failed for two
+# days before anyone read one.
+#
+# Neither pattern was protecting anything. The outbox, and the report bundles in it, live in
+# %LOCALAPPDATA%\SIL\BloomFreezeDoctor\outbox - outside the repo. If you ever do need to ignore an
+# artifact directory at the repo root, anchor it with a leading slash (`/reports/`) so it cannot
+# match a folder of source somewhere else.
