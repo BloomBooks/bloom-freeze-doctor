@@ -107,7 +107,8 @@ public class DoctorSessionTests
 
         Assert.That(read!.Exit, Is.Not.Null);
         Assert.That(read.Exit!.ShutdownPhase, Is.EqualTo(3));
-        Assert.That(read.Exit.BloomAlreadyReported, Is.False);
+        Assert.That(read.Exit.ForcedByDoctor, Is.False, "this was an ordinary shutdown");
+        Assert.That(read.BloomAlreadyReported, Is.False);
     }
 
     [Test]
@@ -115,21 +116,55 @@ public class DoctorSessionTests
     {
         // The point of this flag: a user filing a problem report by hand and a Doctor noticing the same
         // trouble is exactly the situation that would otherwise produce two cards about one problem.
-        var session = Session(556) with
-        {
-            Exit = new DoctorSessionExit
-            {
-                AtUtc = DateTimeOffset.UtcNow,
-                BloomAlreadyReported = true,
-                ReportedId = "BL-16697",
-            },
-        };
+        var session = Session(556) with { BloomAlreadyReported = true, ReportedId = "BL-16697" };
         DoctorSessionStore.TryWrite(session, _directory);
 
         var read = DoctorSessionStore.TryRead(556, _directory);
 
-        Assert.That(read!.Exit!.BloomAlreadyReported, Is.True);
-        Assert.That(read.Exit.ReportedId, Is.EqualTo("BL-16697"));
+        Assert.That(read!.BloomAlreadyReported, Is.True);
+        Assert.That(read.ReportedId, Is.EqualTo("BL-16697"));
+    }
+
+    [Test]
+    public void Saying_Bloom_already_reported_a_problem_does_not_say_Bloom_has_ended()
+    {
+        // This is the shape of a bug Devin caught on the PR. The already-reported note used to be written
+        // *inside* the exit record, so a user who filed a report and then carried on working left a live
+        // Bloom described on disk as finished — which a reader takes as proof of an orderly shutdown, for a
+        // process that may still go on to crash. The two facts are independent and now live in separate
+        // fields.
+        var session = Session(557) with { BloomAlreadyReported = true, ReportedId = "BL-16697" };
+        DoctorSessionStore.TryWrite(session, _directory);
+
+        var read = DoctorSessionStore.TryRead(557, _directory);
+
+        Assert.That(read!.BloomAlreadyReported, Is.True, "the note is recorded");
+        Assert.That(
+            read.Exit,
+            Is.Null,
+            "but the run has NOT ended, and nothing may claim it has while Bloom is still running"
+        );
+    }
+
+    [Test]
+    public void An_exit_the_Doctor_forced_is_not_recorded_as_an_orderly_one()
+    {
+        // Ending a zombie goes through Environment.Exit, which runs the same shutdown path as a clean quit.
+        // Without this distinction, a Bloom we had to end would look like one that shut down properly.
+        var session = Session(558) with
+        {
+            Exit = new DoctorSessionExit
+            {
+                AtUtc = DateTimeOffset.UtcNow,
+                ShutdownPhase = 0,
+                ForcedByDoctor = true,
+            },
+        };
+        DoctorSessionStore.TryWrite(session, _directory);
+
+        var read = DoctorSessionStore.TryRead(558, _directory);
+
+        Assert.That(read!.Exit!.ForcedByDoctor, Is.True);
     }
 
     [Test]

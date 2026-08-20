@@ -150,6 +150,39 @@ public class DoctorChannelTests
     }
 
     [Test]
+    public void An_activity_string_with_multibyte_characters_survives_being_written_and_read()
+    {
+        // Regression test. Truncating on a character boundary was added so a cut book title could not leave a
+        // broken byte in the page — and the first version of that check read one byte past the end whenever no
+        // truncation was needed. The resulting exception was swallowed, which left the write sequence at an odd
+        // value, which every reader treats as "a write is in progress" — silently disabling the channel for the
+        // rest of the run. So this test covers both the short case and the over-long one.
+        using var writer = new DoctorChannelWriter(TestProcessId);
+
+        writer.SetActivity("Publishing “Ekkitaaki Fulfulde” — étape 2");
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var shortOne), Is.True);
+        Assert.That(shortOne!.Activity, Is.EqualTo("Publishing “Ekkitaaki Fulfulde” — étape 2"));
+
+        // Over-long, ending mid-character if cut naively.
+        writer.SetActivity(new string('é', DoctorChannelLayout.ActivityMaxBytes));
+        Assert.That(
+            DoctorChannelReader.TryRead(TestProcessId, out var longOne),
+            Is.True,
+            "the channel must still be readable after a truncating write"
+        );
+        Assert.That(
+            longOne!.Activity,
+            Does.Not.Contain("�"),
+            "and must not contain a replacement character from a half-written multi-byte sequence"
+        );
+
+        // The channel must still work afterwards — the point of keeping the sequence even.
+        writer.RecordUiTick();
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var after), Is.True);
+        Assert.That(after!.UiTicks, Is.EqualTo(1));
+    }
+
+    [Test]
     public void Writing_never_throws_even_when_the_channel_could_not_be_created()
     {
         // Two writers for one pid: the second cannot create the section. Bloom must survive that without

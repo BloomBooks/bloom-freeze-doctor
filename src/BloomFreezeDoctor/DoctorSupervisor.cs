@@ -377,11 +377,11 @@ public sealed class DoctorSupervisor : IDisposable
 
                     // Bloom telling us it already reported the problem outranks everything: a second card
                     // about the same trouble is noise.
-                    if (session?.Exit?.BloomAlreadyReported == true)
+                    if (session?.BloomAlreadyReported == true)
                     {
                         Note(
                             $"Bloom {watcher.Target.ProcessId} exited having already reported the problem "
-                                + $"itself ({session.Exit.ReportedId}); saying nothing"
+                                + $"itself ({session.ReportedId}); saying nothing"
                         );
                         return;
                     }

@@ -204,7 +204,7 @@ public sealed class BloomTargetWatcher : IDisposable
         try
         {
             var session = Contract.DoctorSessionStore.TryRead(Target.ProcessId);
-            return session?.Exit?.BloomAlreadyReported == true;
+            return session?.BloomAlreadyReported == true;
         }
         catch (Exception)
         {
