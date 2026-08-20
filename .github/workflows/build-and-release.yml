@@ -72,8 +72,12 @@ jobs:
             # unsigned exe inside a signed installer is exactly what behavioural antivirus objects to -
             # which matters more than usual for a tool that opens handles to other processes and writes
             # memory dumps. Bloom signs Bloom.exe and BloomPdfMaker.exe separately for the same reason.
+            # Only a tag signs. This used to say `github.event_name != 'pull_request'`, which is also
+            # true of an ordinary push to main, so every push tried to sign, found no credentials, and
+            # failed the build - the header comment above and the release gate below both already said
+            # tags were the intent.
             - name: Sign BloomFreezeDoctor.exe
-              if: github.event_name != 'pull_request'
+              if: startsWith(github.ref, 'refs/tags/v')
               uses: sillsdev/codesign/trusted-signing-action@v3
               with:
                   credentials: ${{ secrets.TRUSTED_SIGNING_CREDENTIALS }}
@@ -109,7 +113,7 @@ jobs:
                   --framework net8.0-x64-desktop
 
             - name: Sign the installer
-              if: github.event_name != 'pull_request'
+              if: startsWith(github.ref, 'refs/tags/v')
               uses: sillsdev/codesign/trusted-signing-action@v3
               with:
                   credentials: ${{ secrets.TRUSTED_SIGNING_CREDENTIALS }}
