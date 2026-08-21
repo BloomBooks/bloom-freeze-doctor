@@ -37,10 +37,13 @@ internal static class Program
             return 1;
         }
 
+        var exe = SafeMainModule(process);
         Console.WriteLine($"=== target: pid {pid} {process.ProcessName} ===");
-        Console.WriteLine($"exe:     {SafeMainModule(process)}");
+        Console.WriteLine($"exe:     {exe}");
         Console.WriteLine($"started: {SafeStartTime(process)}");
         Console.WriteLine($"arch:    {Architecture(process)}");
+        Console.WriteLine($"channel: {DeriveChannel(exe)}  (reports are only filed for real channels)");
+        Console.WriteLine($"cmdline: {CommandLineOf(pid)}");
         Console.WriteLine();
 
         ReportResponsiveness(process);
@@ -57,9 +60,53 @@ internal static class Program
         if (args.Contains("--dump"))
             ReportDumpAndReadItBack(pid);
         if (args.Contains("--attach"))
-            ReportLiveAttach(pid);
+        {
+            // --hold N keeps the suspension open for N seconds so an experimenter can kill THIS
+            // process mid-attach and find out whether the target ever resumes. That is the safety
+            // question in plan section 4.1, and the answer decides whether the fallback path needs
+            // a resume guarantee.
+            var hold = 0;
+            var holdArg = args.FirstOrDefault(a => a.StartsWith("--hold=", StringComparison.Ordinal));
+            if (holdArg != null)
+                int.TryParse(holdArg.Substring("--hold=".Length), out hold);
+            ReportLiveAttach(pid, hold);
+        }
+
+        // The zero-risk alternative: attach without suspending. Nothing we can die holding, so it
+        // can never leave the target stopped. The question is whether the stacks it reads are
+        // usable, since the target keeps running underneath us.
+        if (args.Contains("--attach-nosuspend"))
+            ReportNoSuspendAttach(pid);
 
         return 0;
+    }
+
+    private static void ReportNoSuspendAttach(int pid)
+    {
+        Console.WriteLine("--- ClrMD live attach WITHOUT suspend (cannot strand the target) ---");
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using var target = DataTarget.AttachToProcess(pid, suspend: false);
+            var version = target.ClrVersions.FirstOrDefault();
+            if (version == null)
+            {
+                Console.WriteLine("  no CLR found");
+                return;
+            }
+            using var runtime = version.CreateRuntime();
+            var withStacks = runtime.Threads.Count(t => t.EnumerateStackTrace().Any());
+            sw.Stop();
+            Console.WriteLine(
+                $"  walked {runtime.Threads.Length} managed thread(s), {withStacks} with stacks, in {sw.ElapsedMilliseconds} ms"
+            );
+            PrintLikelyUiThread(runtime);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"  FAILED after {sw.ElapsedMilliseconds} ms: {e.GetType().Name}: {e.Message}");
+        }
+        Console.WriteLine();
     }
 
     #region responsiveness — plan section 3.1
@@ -536,7 +583,7 @@ internal static class Program
     /// threads, and the OS does NOT resume them if we die holding the attach. Run this ONLY
     /// against the stub.
     /// </summary>
-    private static void ReportLiveAttach(int pid)
+    private static void ReportLiveAttach(int pid, int holdSeconds)
     {
         Console.WriteLine("--- ClrMD live attach WITH SUSPEND (target is stopped while we read) ---");
         Console.WriteLine("    !!! never aim this at a Bloom someone is using !!!");
@@ -558,12 +605,80 @@ internal static class Program
                     + $"({threadsWithStacks} with stacks) in {sw.ElapsedMilliseconds} ms of suspension"
             );
             PrintLikelyUiThread(runtime);
+
+            if (holdSeconds > 0)
+            {
+                Console.WriteLine(
+                    $"  HOLDING the suspension for {holdSeconds}s — kill this process now to test"
+                );
+                Console.WriteLine($"  (this probe is pid {Environment.ProcessId})");
+                Console.Out.Flush();
+                Thread.Sleep(TimeSpan.FromSeconds(holdSeconds));
+                Console.WriteLine("  releasing normally");
+            }
         }
         catch (Exception e)
         {
             Console.WriteLine($"  attach FAILED after {sw.ElapsedMilliseconds} ms: {e.GetType().Name}: {e.Message}");
         }
         Console.WriteLine();
+    }
+
+    #endregion
+
+    #region channel — plan section 3.3
+
+    /// <summary>
+    /// Works out Bloom's release channel from the path we can see from outside, mirroring
+    /// Bloom's own ApplicationUpdateSupport.ChannelName. A "Developer/*" answer means the Doctor
+    /// gathers but never files (plan §3.3), and that is the defence that catches a `pnpm go` run
+    /// whether or not a debugger happens to be attached.
+    ///
+    /// One deliberate difference from Bloom's version: Bloom asks about its entry assembly, so it
+    /// tests for a path ending in Bloom.dll. From outside we see the PROCESS, whose main module is
+    /// Bloom.exe, so the developer-build test must not require ".dll" or every dev build would be
+    /// misread as Release — the most dangerous direction to get this wrong.
+    /// </summary>
+    internal static string DeriveChannel(string exePath)
+    {
+        var path = exePath.Replace('\\', '/');
+        if (path.Contains("/output/Debug/", StringComparison.OrdinalIgnoreCase))
+            return "Developer/Debug";
+        if (path.Contains("/output/Release/", StringComparison.OrdinalIgnoreCase))
+            return "Developer/Release";
+        var match = System.Text.RegularExpressions.Regex.Match(
+            path,
+            @"/Bloom([^/]*)/current/",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        );
+        if (match.Success)
+        {
+            var channel = match.Groups[1].Value;
+            if (!string.IsNullOrEmpty(channel))
+                return channel.Replace("-arm64", "");
+        }
+        return "Release";
+    }
+
+    /// <summary>
+    /// The target's command line, which tells us whether this is an automation or headless run that
+    /// must not be reported (plan §3.3), and where the WebView2 debug port is.
+    /// </summary>
+    private static string CommandLineOf(int pid)
+    {
+        try
+        {
+            using var searcher = new System.Management.ManagementObjectSearcher(
+                $"SELECT CommandLine FROM Win32_Process WHERE ProcessId = {pid}"
+            );
+            foreach (var o in searcher.Get())
+                return (o["CommandLine"] as string) ?? "?";
+        }
+        catch (Exception e)
+        {
+            return $"? ({e.GetType().Name})";
+        }
+        return "?";
     }
 
     #endregion

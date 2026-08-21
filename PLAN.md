@@ -1,7 +1,14 @@
 # Bloom Freeze Doctor — Plan (BL-16719)
 
-Status: **draft for John's review.** Revision 2, after a review by Fable whose corrections are
-folded in (its findings are noted inline as `[rev2]` where they changed the design).
+Status: **live working document**, revision 6. It is written to the Bloom team rather than to the
+public, so it addresses the reader directly and records arguments as well as conclusions — that history
+is the useful part, and it is kept deliberately. Revision markers (`[rev2]` … `[rev6]`) mark what
+changed and why: rev 2 folded in a review by Fable, rev 3–5 the decisions in §10 as they were settled,
+and rev 6 the first Phase 0 spike findings (see `docs/SPIKE-FINDINGS.md`, which supersedes this
+document wherever the two disagree, because it was measured).
+
+All nine decisions in §10 are settled, D7's signing mechanism included `[rev7]`. What remains is the
+spike work itemized at the end of the findings document, and the building.
 
 ## 1. The problem, and the three states we must diagnose
 
@@ -263,16 +270,23 @@ offline with ClrMD — one artifact and one analysis pipeline serving both freez
 the size the card asks for. Whether its stacks are as complete as we need is the single most
 important thing the spike must settle.
 
-**Fallback, when that pipe does not answer: `MiniDumpWriteDump` + ClrMD live attach.** Two safety
-rules, both non-negotiable:
+**Both measured in the spike, and the fallback changed as a result** `[rev6]`. `WriteDump` produced a
+2.2 MB dump in ~0.5 s **even with the UI thread wedged**, and ClrMD walked every managed thread out of
+it, naming the blocking call. Meanwhile the suspending live attach that rev 2 planned as the fallback
+turned out to be indefensible:
 
-1. **Resume must be guaranteed.** ClrMD's `AttachToProcess(pid, suspend: true)` suspends threads, and
-   unlike a real debugger attach **the OS does not undo that if the reader dies** — a Doctor crash
-   mid-walk would leave Bloom suspended forever, turning a recoverable hang into a permanent one.
-   The suspend-and-walk therefore runs in a short-lived child process whose parent guarantees resume
-   (and the hang detector is muted during it, so it does not observe its own artifact).
-2. **Bounded.** A couple of seconds total, because at the 60 s threshold Tier A cannot rule out that
-   Bloom is legitimately mid-upload.
+- A probe hard-killed mid-attach left the target **alive and suspended at +1 s, +4 s, +10 s and +20 s**,
+  and a later clean attach-and-dispose did **not** revive it. There is no recovery short of killing
+  Bloom, so a Doctor crash during diagnosis would turn a recoverable hang into an unrecoverable one.
+- **So `suspend: true` is removed from the design entirely** — not guarded with a child process as rev 2
+  proposed. The general rule it leaves behind: *prefer mechanisms whose failure cannot leave the target
+  suspended.* `WriteDump` qualifies inherently, because the target's own runtime does the work; if we
+  die, it simply finishes or abandons on its own.
+
+**The fallback is therefore a non-suspending attach:** `AttachToProcess(pid, suspend: false)` walked
+all threads of a frozen stub in **197 ms**, correctly showing `Monitor.Wait`, and cannot strand
+anything. If neither mechanism works we report the OS-level evidence and say plainly that managed
+stacks were unavailable — a far better failure than a bricked Bloom.
 
 Managed stacks are resolved to **text on the user's machine** and that text is what we attach. This is
 deliberate: a stacks-only minidump generally cannot reproduce managed frames later without heap
@@ -524,7 +538,14 @@ We cannot wait for real freezes, so we build the triggers:
 | **3. Bloom cooperation (BloomDesktop PR)** | MMF heartbeat + minor-event ring, breadcrumbs and in-flight API table, session/exit/reported markers, auto-launch and rendezvous, bounded crash-time dump handshake, dev-only freeze triggers, optional CTRL+Help manual launch. | Better data *and* the detector that catches the STA-wait freezes Tier A misses — but gated on a Bloom release, so it runs in parallel with 1–2. |
 | **4. Extras** | Admin-only extras, dump retention policy, Doctor self-update. **Continuous CDP console/network recording is cut** `[rev2]` — permanently attaching to every user's WebView2 with Network/Console enabled is standing overhead for speculative benefit; the at-freeze responsiveness probe plus ~10 s capture is the 90% version. Revisit only if a real card shows we needed the history. | Refinements once the core has shown what is actually useful. |
 
-### 9.1 A safe subset to backport into 6.4 `[rev5]`
+### 9.1 A safe subset to backport into 6.4 — ON HOLD `[rev8]`
+
+> **Deferred deliberately until 6.5 has had field testing.** The Bloom-side work is written and merged on
+> `BL-16719-Freeze-Doctor`, and it works — but it has only ever been seen to work on our own machines, on
+> freezes we caused on purpose. Backporting a heartbeat into a released line on that basis would be
+> premature. Once 6.5 has been in real users' hands and the reports that come back are the ones we
+> expected, revisit the ranked list below.
+
 
 Worth doing, and the value/risk ratio is better than expected: the two most valuable pieces of Tier B
 are also the safest, because they are write-only, additive, and impossible to fail in a way that
@@ -542,7 +563,18 @@ worth.
 
 Ranked by what each buys against what it risks:
 
-1. **The session file. Do this one first.** At startup, write one small JSON: pid, version, channel,
+1. **The UI-thread heartbeat. First, and the spike is why** `[rev6]`. A 500 ms WinForms timer bumping
+   a counter, plus a background thread publishing it through the memory-mapped file (cheaper and less
+   racy here than rewriting a file twice a second). ~40 lines.
+   *What it buys:* the only detector we have for a freeze in an STA managed wait. The spike measured
+   Tier A as **totally blind** to that case — `IsHungAppWindow` False, `Process.Responding` True,
+   `SendMessageTimeout` answering in 0 ms, while the UI thread sat in `Monitor.Wait` — and the cause is
+   inherent to how `CoWaitForMultipleHandles` pumps sent messages, so there is no cleverer outside
+   probe to find. Bloom's UI thread awaits WebView2 constantly, so this is likely a *common* Bloom
+   freeze shape rather than an exotic one. A 6.4 without this cannot see that whole family of freezes.
+   *Ship it together with item 2*, since a heartbeat-detected freeze still needs the log path to
+   produce a useful report.
+2. **The session file.** At startup, write one small JSON: pid, version, channel,
    exe path, command line, start time, http/ws/cdp ports, collection name, and — the point of the
    exercise — **`Logger.LogPath`**. Write-once, on a background thread a moment after startup, wrapped
    in a catch-everything.
@@ -551,24 +583,20 @@ Ranked by what each buys against what it risks:
    restart-after-freeze case) becomes a lookup; the 9222-versus-`httpPort+2` guessing goes away; and so
    does reading the CDP port out of the WebView2 child's command line because http.sys hides Bloom's
    own port. Perhaps 30 lines, and it removes several Phase 0 unknowns.
-2. **The clean-exit proof.** One `AppDomain.CurrentDomain.ProcessExit` handler writing a tiny record —
+3. **The clean-exit proof.** One `AppDomain.CurrentDomain.ProcessExit` handler writing a tiny record —
    §3.5 in about ten lines. *What it buys:* state 2 stops being exit-code archaeology and becomes
    positive proof, on the installed base. *The one caveat:* this is the only item that touches
    shutdown, and Bloom's shutdown has form (`ProgramExit` force-quits after 20 s). It is the same class
    of work Bloom already does there — the end of `Main` rewrites the whole log file — but it must be a
    sub-kilobyte write that cannot block and cannot throw.
-3. **The UI-thread heartbeat.** A 500 ms WinForms timer bumping a counter, plus a background thread
-   publishing it through the memory-mapped file (cheaper and less racy here than rewriting a file
-   twice a second). ~40 lines. *What it buys:* the §3.1 signal-2 detector — the one that catches
-   freezes in STA managed waits, which `IsHungAppWindow` reports as healthy and which we suspect is
-   the *common* case for Bloom. High value; slightly more code than 1 and 2, and the reason it is third
-   rather than second.
 4. **The in-flight API table.** The highest-value item diagnostically — it may simply *answer*
    BL-16697 with "POST /bloom/api/publish/… started 47 s ago and never returned" — but the only one
    that touches a hot path, `BloomApiHandler.ProcessRequestAsync`, which every request goes through. It
    can be made genuinely safe (a couple of array writes into a fixed-size slot indexed by thread, no
    locks, no allocation, nothing that can throw), but "safe if written carefully" is a different claim
    from items 1–3. Patch it only after those have proved themselves, and only with dogfooding first.
+   Note it remains the best item *diagnostically* — the reordering above is about what is
+   **detectable**, not about what explains a freeze once detected.
 5. **The "already reported" marker.** Three lines where `ProblemReportApi` succeeds. Retires §5.2's
    log-scraping hold-off hack. Trivial, do it while we are in there.
 
@@ -618,24 +646,29 @@ My recommendation first in each.
   `auto_report_creator` token — BloomDesktop is already public and already carries it in the clear, so
   this adds no new exposure. A serverless relay (nothing shipped) stays on the list as later hardening
   for both apps, not a prerequisite.
-- **D7 — Signing. DECIDED `[rev5]`: we sign. Mechanism pending your research.** No unsigned public
-  installer, for the AV/EDR reasons in §7. You are checking whether the organization can sign from
-  GitHub or whether this needs a TeamCity step; either satisfies the gate. What the plan needs from the
-  answer, so it can be built for whichever way it lands:
-  - **If GitHub can sign** (Azure Trusted Signing, SignPath's OSS plan, or an org credential usable from
-    Actions): the release stays entirely in GHA, `vpk pack` gains sign parameters, and the private key
-    never leaves the signing service. Cleanest outcome.
-  - **If it needs TeamCity**: GHA builds and tests, and a small TeamCity job does sign-and-publish using
-    the same `sign` command Bloom already uses (`build/Bloom.proj`), with the GitHub release created
-    from there. Slightly more moving parts, no new secret handling, and it reuses a path we know works.
-  - **Either way, sign the exe as well as the installer.** Velopack ships the exe inside the package, and
-    an unsigned exe inside a signed installer is exactly what behavioural AV objects to (§7) — Bloom
-    already signs `Bloom.exe` and `BloomPdfMaker.exe` separately for this reason.
-  - **Both artifacts get signed before we ship — this is settled, not an option** `[rev5]`: the
-    `BloomFreezeDoctor.exe` *and* the installer. Velopack ships the exe inside the package, and an
-    unsigned exe inside a signed installer is exactly what behavioural AV objects to (§7); Bloom already
-    signs `Bloom.exe` and `BloomPdfMaker.exe` separately for the same reason. (No arm64 question to ask
-    any more — see §4.5.)
+- **D7 — Signing. FULLY SETTLED, mechanism included `[rev7]`.** BloomBooks already signs from GitHub
+  Actions, so the release stays entirely in GHA and no TeamCity step is needed. The pattern comes from
+  `BloomBooks/bloompub-viewer`'s `main.yml`:
+  - **`sillsdev/codesign/trusted-signing-action@v3`** — an SIL wrapper around **Azure Trusted
+    Signing** — authenticated with a `TRUSTED_SIGNING_CREDENTIALS` secret (a JSON blob of
+    tenant/client/secret/endpoint/account, masked in the logs). No certificate or private key ever
+    touches the runner.
+  - Guarded with `if: github.event_name != 'pull_request'`, so pull requests build and test without
+    consuming signing quota.
+  - It takes `files` (explicit paths) or `files-folder` plus `files-folder-filter`, so **signing the exe
+    and the installer is two invocations of the same action**: once over `BloomFreezeDoctor.exe` before
+    `vpk pack`, once over the packed installer afterwards. That is how we satisfy the sign-both
+    requirement — Velopack ships the exe inside the package, and an unsigned exe inside a signed
+    installer is exactly what behavioural AV objects to (§7), which is why Bloom signs `Bloom.exe` and
+    `BloomPdfMaker.exe` separately as well.
+  - `use-test-certificate: true` exists for exercising the pipeline without producing distributable
+    binaries. Worth using while the workflow is being written, rather than signing junk with the real
+    certificate.
+  - **Gotcha to design around, from the viewer's own comment: signing renames the file.** Theirs goes
+    from `BloomPUB-Viewer-Setup-<x.y.z>.exe` to `BloomPub.Viewer Setup <x.y.z>.exe`, and uploading turns
+    the spaces into periods; they cope by globbing both forms in the release step. Our release step must
+    not assume the name it produced survives signing.
+  - (No arm64 question to ask any more — see §4.5.)
 - **D8 — Ordering. DECIDED `[rev5]`: as recommended, with two riders.** Tier A leads, because it helps
   someone frozen on 6.3.2 today; whichever is ready first wins, and the Bloom-side changes proceed in
   parallel as time permits. Plus: **a safe subset gets backported to 6.4** — see §9.1 for the ranked

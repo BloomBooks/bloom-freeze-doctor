@@ -1,0 +1,124 @@
+name: Build, sign and release
+
+# Pull requests build and test but never sign: signing quota is finite and a PR is not a release.
+# Pushing a v* tag produces a signed installer and a draft GitHub release.
+on:
+    push:
+        tags:
+            - "v*"
+        branches:
+            - main
+    pull_request:
+        branches:
+            - main
+    workflow_dispatch:
+
+jobs:
+    build:
+        runs-on: windows-latest
+
+        steps:
+            - name: Check out
+              uses: actions/checkout@v4
+
+            - name: Set up .NET
+              uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: "8.0.x"
+
+            - name: Build
+              run: dotnet build --configuration Release
+
+            - name: Test
+              # The detection rules are where the subtle mistakes live, so a red test run must stop a
+              # release rather than merely be noted.
+              run: dotnet test --configuration Release --no-build --verbosity normal
+
+            - name: Publish the Doctor
+              run: >
+                  dotnet publish src/BloomFreezeDoctor/BloomFreezeDoctor.csproj
+                  --configuration Release
+                  --runtime win-x64
+                  --self-contained false
+                  --output publish
+
+            # Sign the EXE before packaging. Velopack ships the exe inside the installer, and an
+            # unsigned exe inside a signed installer is exactly what behavioural antivirus objects to -
+            # which matters more than usual for a tool that opens handles to other processes and writes
+            # memory dumps. Bloom signs Bloom.exe and BloomPdfMaker.exe separately for the same reason.
+            # Only a tag signs. This used to say `github.event_name != 'pull_request'`, which is also
+            # true of an ordinary push to main, so every push tried to sign, found no credentials, and
+            # failed the build - the header comment above and the release gate below both already said
+            # tags were the intent.
+            - name: Sign BloomFreezeDoctor.exe
+              if: startsWith(github.ref, 'refs/tags/v')
+              uses: sillsdev/codesign/trusted-signing-action@v3
+              with:
+                  credentials: ${{ secrets.TRUSTED_SIGNING_CREDENTIALS }}
+                  files-folder: publish
+                  files-folder-filter: BloomFreezeDoctor.exe
+                  description: "Bloom Freeze Doctor"
+                  description-url: "https://github.com/BloomBooks/bloom-freeze-doctor"
+
+            - name: Install the Velopack CLI
+              run: dotnet tool install --global vpk
+
+            - name: Read the version from the tag
+              id: version
+              shell: pwsh
+              # A tag build releases its tag; anything else builds a throwaway package that is never
+              # released, so the packaging step is exercised on every push rather than only when we tag.
+              #
+              # The placeholder is 0.0.1, not 0.0.0: Velopack rejects 0.0.0 outright ("it must be
+              # >= 0.0.1") and fails the pack step. Nothing had ever caught that, because signing ran
+              # first and failed first, so this branch of the version logic had never once executed.
+              run: |
+                  $tag = "${{ github.ref_name }}"
+                  $version = if ($tag -match '^v(\d+\.\d+\.\d+)$') { $Matches[1] } else { "0.0.1" }
+                  "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                  Write-Host "packaging version $version"
+
+            - name: Pack the installer
+              run: >
+                  vpk pack
+                  --packId BloomFreezeDoctor
+                  --packVersion ${{ steps.version.outputs.version }}
+                  --packDir publish
+                  --mainExe BloomFreezeDoctor.exe
+                  --packAuthors "SIL Global"
+                  --packTitle "Bloom Freeze Doctor"
+                  --outputDir installer
+                  --framework net8.0-x64-desktop
+
+            - name: Sign the installer
+              if: startsWith(github.ref, 'refs/tags/v')
+              uses: sillsdev/codesign/trusted-signing-action@v3
+              with:
+                  credentials: ${{ secrets.TRUSTED_SIGNING_CREDENTIALS }}
+                  files-folder: installer
+                  files-folder-filter: "*Setup*.exe"
+                  description: "Bloom Freeze Doctor Installer"
+                  description-url: "https://github.com/BloomBooks/bloom-freeze-doctor"
+
+            - name: Keep the build's output even when we are not releasing
+              uses: actions/upload-artifact@v4
+              with:
+                  name: installer
+                  path: installer/*
+
+            - name: Draft a release
+              if: startsWith(github.ref, 'refs/tags/v')
+              uses: softprops/action-gh-release@v2
+              # Signing RENAMES the file - the BloomPUB Viewer repo hit this and works around it the same
+              # way - so glob rather than naming what we produced.
+              with:
+                  files: |
+                      installer/*Setup*.exe
+                      installer/*.nupkg
+                      installer/RELEASES*
+                  name: ${{ github.ref_name }}
+                  body: |
+                      Bloom Freeze Doctor ${{ github.ref_name }}.
+
+                      Still early work in progress: see the README before installing.
+                  draft: true

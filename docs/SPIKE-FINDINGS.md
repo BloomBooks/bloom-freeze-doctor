@@ -95,7 +95,112 @@ its emptiness, state 3), per-thread CPU deltas over a sampling window (spin vs d
 `CheckRemoteDebuggerPresent`, module enumeration filtered to unexplained DLLs, and
 `IsWow64Process2` for architecture.
 
-## 6. Wait chains — nothing yet, as predicted
+## 6. CONFIRMED THE DANGER — a suspending attach can strand Bloom permanently, so we are dropping it
+
+The plan's §4.1 said the OS does not undo ClrMD's suspension if the reader dies, and required a
+resume guarantee. Measured, and it is worse than "requires care":
+
+1. `DataTarget.AttachToProcess(pid, suspend: true)` — stub stops responding, as expected.
+2. Probe **hard-killed** mid-attach (`TerminateProcess`).
+3. Stub checked at +1 s, +4 s, +10 s, +20 s: **alive, still not responding, every time.**
+4. A second *clean* attach-and-dispose afterwards **did not** revive it either — as the suspend-count
+   semantics predict, since our new attach increments the count and its dispose only decrements what
+   it added.
+
+**There is no recovery short of killing Bloom.** A Doctor crash during diagnosis would convert a
+recoverable hang into an unrecoverable one — the single worst thing this tool could do.
+
+**Design change: remove the suspending attach entirely.** Not "guard it with a child process" as §4.1
+proposed — delete it. Finding 1 means we do not need it, and there is a safe fallback (next finding).
+The principle worth keeping: **prefer mechanisms whose failure cannot leave the target suspended.**
+`WriteDump` qualifies inherently, because the *target's own runtime* does the work — if we die, it
+simply finishes or abandons on its own.
+
+## 7. CONFIRMED — a non-suspending attach is a safe, fast fallback
+
+`DataTarget.AttachToProcess(pid, suspend: false)` against the stub frozen in an STA managed wait:
+walked all 3 managed threads with stacks in **197 ms**, correctly showing
+`Monitor.ObjWait` / `Monitor.Wait` — the true blocking location — and the stub stayed alive and
+untouched.
+
+So the ladder becomes, in order:
+
+1. `DiagnosticsClient.WriteDump(Normal)` — a dump artifact *and* stacks; the target does the work.
+2. `AttachToProcess(suspend: false)` — stacks only, ~200 ms, cannot strand the target.
+3. **Never** `suspend: true`.
+
+If neither works we report the OS-level evidence and say plainly that managed stacks were
+unavailable. That is a much better failure than a bricked Bloom.
+
+## 8. CONFIRMED — the clean-exit proof behaves exactly as §3.5 requires
+
+Added a `ProcessExit` handler to the stub that writes a tiny proof file, then measured every exit
+path. The middle column is the one §3.5 depends on:
+
+| How it ended | Exit code | Proof left? |
+| --- | --- | --- |
+| Clean quit (`Application.Exit`) | `0` | **yes** — `source=ProcessExit shutdownPhase=1` |
+| `Environment.FailFast` | `0x80131623` | **no** |
+| Unhandled exception | `0xE0434352` | **no** |
+| Hard kill — Task Manager, or a debugger stop | `-1` (`0xFFFFFFFF`) | **no** |
+| Zombie: window closed, foreground thread alive | still running, **no window handle** | no |
+
+`ProcessExit` fires for the orderly exit and for nothing else. §3.5's inversion — report any exit that
+leaves no proof — is therefore implementable exactly as written, the phase counter comes along for
+free, and the exit codes the plan guessed at are confirmed (they were recalled, not tested; both were
+right). The zombie row also confirms state 3 is detectable from outside: process alive, window handle
+gone.
+
+## 9. CONFIRMED, and the naive alternative is provably wrong — mapping logs to pids
+
+Matching each log's opening `App Launched with [exe]` line against every Bloom's start time and exe
+path, run against the real Blooms on this machine: `Log.txt` → pid 58460, correctly.
+
+**And it caught the trap §4.4 warned about, in the wild.** The most-recently-*modified* log on this
+machine (`Log-tmpkkmwaa.txt`, 17:16) belongs to a *different* Bloom — one from another worktree — while
+the log actually belonging to the live pid (`Log.txt`) was modified nearly an hour earlier. "Newest
+file wins" would have attached the wrong log to the report. No handle enumeration needed; this
+heuristic replaces it.
+
+Bonus: that line carries the **whole command line**, including `--automation`, `--label` and
+`--vite-port`. That is exactly what §3.3 needs to recognise automation and headless runs and not
+report them.
+
+## 10. Incidental but reassuring — debugger detection fired on a real Bloom
+
+`CheckRemoteDebuggerPresent` returned **True** for the developer's running Bloom (pid 58460), which is
+being debugged from Visual Studio. The §3.5 defence works against a real target, not just in theory —
+and it is a reminder of how often a developer's Bloom is in exactly the state that must never be
+reported.
+
+## 11. LIMITATION — only one of Bloom's WebView2s is ever inspectable over CDP
+
+Running the finished Doctor against a real installed 6.3.2 produced a WebView2 section that talked to the
+browser happily — and reported exactly **one** page target, `about:blank`. A Bloom sitting on its
+Collections tab plainly has more going on than that.
+
+The cause is visible in Bloom's own log: it creates several WebView2s, each with **its own user data
+folder** (`Bloom WV2-80892`, `…-80893`, and so on). A distinct user data folder means a distinct browser
+process, and Bloom passes **the same `--remote-debugging-port` to all of them** — 9222 in 6.3,
+`httpPort + 2` in 6.4 and later. Only one process can bind a port, so:
+
+- exactly one of Bloom's WebView2s ends up listening, and
+- **which one is a race**, so it is quite likely not the one you want.
+
+In this test the winner was an `about:blank` view, i.e. the least informative one available.
+
+**What this means for the plan.** §4.3's renderer-responsiveness signal is still worth having — a wedged
+*browser process* affects all views in that process, and the healthy-versus-wedged answer is still the
+triage fork it always was — but it must be read as being about *one arbitrary WebView2*, not about
+Bloom's UI as a whole. The report should say so rather than implying wider coverage.
+
+**And it is a Tier B opportunity worth taking.** Bloom knows which of its WebView2s is which. Giving each
+one a distinct debugging port and publishing the list (with what each view is for) in the session file
+would turn this section from "one arbitrary view answered" into "the editing view is wedged and the
+toolbox view is fine" — which is a genuinely different quality of evidence. Cheap to do on the Bloom
+side, and it needs no new mechanism, just a port number per WebView2 and a line in the session file.
+
+## 12. Wait chains — nothing yet, as predicted
 
 `GetThreadWaitChain` returned no chains worth printing for a healthy process or for one blocked in a
 managed wait, consistent with §4.2's warning that WCT does not see `Monitor`/`SemaphoreSlim`/async
@@ -106,14 +211,24 @@ bonus rather than a foundation.
 
 ## Still to do in this spike
 
-- ClrMD live attach with `suspend: true`, **and the safety test**: kill the probe mid-suspend and see
-  whether the stub ever resumes (§4.1's non-negotiable rule).
-- Exit codes for `FailFast`, an unhandled throw, a clean exit, and a debugger stop (§3.4, §3.5).
-- State 3 detection against the stub's `zombie` command, and ending it (§3.6).
-- `--logmap` against the real Blooms: does matching the log's `App Launched with [exe]` line to
-  process start time and exe path replace handle enumeration (§4.4)?
-- Wait chains against a real deadlock.
-- A read-only pass over an *installed* Bloom (6.3/6.4), not just dev builds.
+- **Wait chains against a genuine cross-thread deadlock.** Low stakes: the plan already treats WCT as
+  a bonus rather than a foundation, and findings 1 and 7 give us managed stacks either way.
+- **A read-only pass over an *installed* Bloom (6.3/6.4)** rather than a dev build, to confirm two
+  things we currently know only from reading the source: that 6.3 really does listen on the hardcoded
+  CDP port 9222, and that channel detection from the installed path (`…/Bloom/current/Bloom.dll` ⇒
+  `Release`) behaves. Deferred deliberately — launching the developer's installed Bloom opens their
+  real collection, so it wants doing at a moment that suits them.
+- **Ending a zombie** (§3.6) — detection is confirmed (finding 8); the kill-and-verify-the-token-frees
+  half is not yet exercised.
+
+## Carry-over notes for Phase 1
+
+- Attribute each CDP port to its **parent** Bloom pid (finding 4).
+- Sample `CheckRemoteDebuggerPresent` while the target lives and keep it sticky (finding 10 shows how
+  routinely a developer Bloom is under a debugger).
+- Prefer `SendMessageTimeout` over `IsHungAppWindow` as the sampled signal (finding 3).
+- Never call `AttachToProcess` with `suspend: true` (finding 6). If someone adds it later, the review
+  question is "what happens to Bloom if this process is killed on the next line?"
 
 ## YouTrack capability findings (done, §5 depends on these)
 
