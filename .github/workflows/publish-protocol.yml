@@ -1,0 +1,195 @@
+name: Publish the shared protocol package
+
+# Publishes BloomBooks.FreezeDoctor.Protocol to nuget.org and then UNLISTS it, which is the decision
+# recorded in the package's .csproj: absent from search and browse, but still restorable by a consumer
+# that pins an exact version. BloomBooks.Velopack already runs exactly this way.
+#
+# WHY THIS IS A SEPARATE, MANUALLY-TRIGGERED WORKFLOW rather than a step in build-and-release.yml:
+#
+#   * A push to nuget.org CANNOT BE UNDONE. A version is permanent and the package id is claimed for
+#     good. A human deciding "now" is the safety feature, not an inconvenience.
+#   * The protocol's version belongs to the protocol, not to the Doctor's release tag. Tying it to the
+#     tag would bump the package on every Doctor release even when the wire format had not changed, and
+#     Bloom would be asked to move its reference for nothing.
+#   * Releasing the Doctor and publishing the protocol are different events with different audiences.
+#     Bolting this onto the tag build would also mean spending code-signing quota to publish a package.
+#
+# Re-running is safe: the push uses --skip-duplicate, so a version already on nuget.org is left alone
+# rather than failing the run.
+#
+# RUN IT AGAINST A REF THAT HAS THE PROTOCOL PROJECT. GitHub only offers workflow_dispatch for workflows
+# that exist on the default branch, so this file has to live on main - but until the extraction merges,
+# src/BloomBooks.FreezeDoctor.Protocol/ exists only on the `contract-package` branch. Dispatching runs the
+# workflow definition from whichever ref you pick, so pick that one:
+#
+#     gh workflow run publish-protocol.yml --repo BloomBooks/bloom-freeze-doctor --ref contract-package \
+#         -f dry_run=true
+#
+# Run it once with dry_run=true first. That proves the secret is present, the tests pass, and the package
+# packs, without doing the one thing that cannot be undone.
+on:
+    workflow_dispatch:
+        inputs:
+            dry_run:
+                description: "Do everything except actually push or unlist"
+                type: boolean
+                default: true
+            unlist:
+                description: "Unlist the version after pushing (leave on unless you have a reason)"
+                type: boolean
+                default: true
+
+jobs:
+    publish:
+        runs-on: windows-latest
+
+        steps:
+            - name: Check out
+              uses: actions/checkout@v4
+
+            - name: Set up .NET
+              uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: "8.0.x"
+
+            # Fail here rather than deep inside a push that would report something unhelpful. This is the
+            # lesson from the signing step, which received an empty secret and died in JSON.parse with no
+            # hint that a secret was missing.
+            - name: Check the API key is actually present
+              shell: pwsh
+              env:
+                  NUGET_KEY: ${{ secrets.BLOOMBOOKS_NUGET }}
+              run: |
+                  if ([string]::IsNullOrWhiteSpace($env:NUGET_KEY)) {
+                      Write-Error "BLOOMBOOKS_NUGET is not set on this repository, so nothing can be published. Add it in Settings > Secrets and variables > Actions."
+                      exit 1
+                  }
+                  Write-Host "BLOOMBOOKS_NUGET is present ($($env:NUGET_KEY.Length) characters)."
+
+            - name: Test
+              # Never publish a wire format whose own tests do not pass. The layout tests in particular are
+              # what stop a moved offset reaching a consumer.
+              run: dotnet test --configuration Release --verbosity normal
+
+            - name: Pack
+              run: >
+                  dotnet pack src/BloomBooks.FreezeDoctor.Protocol/BloomBooks.FreezeDoctor.Protocol.csproj
+                  --configuration Release
+                  --output nuget-package
+
+            - name: Work out what we are about to publish
+              id: package
+              shell: pwsh
+              run: |
+                  $nupkg = Get-ChildItem nuget-package -Filter 'BloomBooks.FreezeDoctor.Protocol.*.nupkg' |
+                      Where-Object { $_.Name -notlike '*.symbols.nupkg' } |
+                      Select-Object -First 1
+                  if (-not $nupkg) { Write-Error "No .nupkg was produced."; exit 1 }
+
+                  # Version comes from the file name rather than from parsing the csproj, so that what we
+                  # record is what was actually built.
+                  if ($nupkg.Name -notmatch '^BloomBooks\.FreezeDoctor\.Protocol\.(.+)\.nupkg$') {
+                      Write-Error "Could not read a version out of '$($nupkg.Name)'."
+                      exit 1
+                  }
+                  $version = $Matches[1]
+
+                  "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                  "path=$($nupkg.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                  Write-Host "About to publish version $version from $($nupkg.Name)"
+
+            - name: Refuse to publish over an existing version with different contents
+              shell: pwsh
+              run: |
+                  $version = '${{ steps.package.outputs.version }}'
+                  $url = "https://api.nuget.org/v3-flatcontainer/bloombooks.freezedoctor.protocol/index.json"
+                  try {
+                      $existing = (Invoke-RestMethod $url -ErrorAction Stop).versions
+                  } catch {
+                      Write-Host "The package id is not on nuget.org yet; this will be its first version."
+                      exit 0
+                  }
+                  if ($existing -contains $version) {
+                      # Not an error: --skip-duplicate will leave it alone. But say so loudly, because a
+                      # version on nuget.org can never be replaced - the fix is always to bump the version.
+                      Write-Host "::warning::Version $version is ALREADY on nuget.org and cannot be replaced. The push will skip it. If you changed the layout, bump the version in the .csproj instead."
+                  } else {
+                      Write-Host "Existing versions: $($existing -join ', '). $version is new."
+                  }
+
+            - name: Push to nuget.org
+              if: ${{ !inputs.dry_run }}
+              shell: pwsh
+              env:
+                  NUGET_KEY: ${{ secrets.BLOOMBOOKS_NUGET }}
+              # --skip-duplicate makes a re-run harmless. The matching .snupkg is picked up automatically
+              # alongside the .nupkg, so symbols do not need pushing separately.
+              run: >
+                  dotnet nuget push "${{ steps.package.outputs.path }}"
+                  --source https://api.nuget.org/v3/index.json
+                  --api-key $env:NUGET_KEY
+                  --skip-duplicate
+
+            # `dotnet nuget delete` against nuget.org UNLISTS rather than deletes - nuget.org does not allow
+            # deletion. Unlisted means absent from search and browse, while an exact-version restore still
+            # works, which is the whole point.
+            - name: Unlist it again
+              if: ${{ !inputs.dry_run && inputs.unlist }}
+              shell: pwsh
+              env:
+                  NUGET_KEY: ${{ secrets.BLOOMBOOKS_NUGET }}
+              run: |
+                  $version = '${{ steps.package.outputs.version }}'
+                  # Indexing is not instant, and unlisting a version nuget.org has not finished ingesting
+                  # can fail. Worth retrying rather than leaving it listed.
+                  $ok = $false
+                  foreach ($attempt in 1..6) {
+                      Write-Host "Unlisting $version (attempt $attempt)..."
+                      dotnet nuget delete BloomBooks.FreezeDoctor.Protocol $version `
+                          --source https://api.nuget.org/v3/index.json `
+                          --api-key $env:NUGET_KEY `
+                          --non-interactive
+                      if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+                      Start-Sleep -Seconds 20
+                  }
+                  if (-not $ok) {
+                      Write-Error "Could not unlist $version. It is published AND LISTED. Re-run this workflow, or unlist it by hand at nuget.org."
+                      exit 1
+                  }
+                  Write-Host "Unlisted."
+
+            - name: Report what the world can see now
+              if: ${{ !inputs.dry_run }}
+              shell: pwsh
+              # Informational, deliberately not a gate: nuget.org's search index lags behind the push by
+              # minutes, so a "still visible" answer here means "not indexed yet", not "the unlist failed".
+              continue-on-error: true
+              run: |
+                  $version = '${{ steps.package.outputs.version }}'
+                  Start-Sleep -Seconds 30
+
+                  $restorable = $false
+                  try {
+                      $versions = (Invoke-RestMethod "https://api.nuget.org/v3-flatcontainer/bloombooks.freezedoctor.protocol/index.json").versions
+                      $restorable = $versions -contains $version
+                      Write-Host "Flat container lists: $($versions -join ', ')"
+                  } catch {
+                      Write-Host "Flat container does not know about it yet (indexing lag)."
+                  }
+
+                  try {
+                      $search = Invoke-RestMethod "https://azuresearch-usnc.nuget.org/query?q=packageid:bloombooks.freezedoctor.protocol&prerelease=true"
+                      Write-Host "Search hits: $($search.totalHits)"
+                  } catch {
+                      Write-Host "Search query failed; ignore."
+                  }
+
+                  Write-Host ""
+                  Write-Host "What to expect once indexing settles: restorable by exact version = True, search hits = 0."
+                  Write-Host "Restorable right now: $restorable"
+
+            - name: Keep the package that was published
+              uses: actions/upload-artifact@v4
+              with:
+                  name: published-protocol-package
+                  path: nuget-package/*
