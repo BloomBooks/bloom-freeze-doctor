@@ -74,11 +74,22 @@ public static class DoctorSignals
     {
         try
         {
-            return EventWaitHandle.OpenExisting(name);
+            // TryOpenExisting, not OpenExisting. "Nobody has created it" is the ORDINARY answer here —
+            // most Blooms run on a machine with no Doctor installed — and OpenExisting reports that by
+            // throwing WaitHandleCannotBeOpenedException. Using an exception for the expected case is
+            // wrong on its own terms, and it is worse than usual given where this is called from:
+            // Exists() and TrySignal() both come through here, and Exists() is what Bloom asks on its
+            // CRASH path to find out whether a Doctor is listening before it waits for a dump. Throwing
+            // and catching inside a process that is already dying is the last thing that code needs.
+            //
+            // The try/catch stays, for the genuinely unexpected: a name that is malformed or too long, or
+            // an existing handle we are not permitted to open. Those are worth swallowing too — a signal
+            // we cannot reach just means that capability is unavailable — but they are not the common
+            // path, which is the distinction that matters.
+            return EventWaitHandle.TryOpenExisting(name, out var handle) ? handle : null;
         }
         catch (Exception)
         {
-            // WaitHandleCannotBeOpenedException in the ordinary case: the other side is not there.
             return null;
         }
     }

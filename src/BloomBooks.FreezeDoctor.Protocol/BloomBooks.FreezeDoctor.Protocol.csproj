@@ -71,6 +71,12 @@
     -->
     <PackageId>BloomBooks.FreezeDoctor.Protocol</PackageId>
     <!--
+      0.3.1-alpha: DoctorSignals.TryOpen stopped using an exception to report its commonest answer. A PATCH
+      because the shared page's layout is untouched - but still a bump, because 0.3.0-alpha has already been
+      restored onto machines, and the caching rule below is about CONTENTS, not only about layout. (The 403
+      on the first publish attempt means 0.3.0-alpha never reached nuget.org, so re-using the number would
+      have been permitted; it would just have left developers quietly running the old assembly.)
+
       0.3.0-alpha: a sticky "a debugger has been attached at some point" flag, and the time one was last
       detached. Appended, so PayloadBytes grew from 328 to 336 - and BaselinePayloadBytes was raised to
       match, which is only allowed because generation 1 is still unreleased and there is no older writer to
@@ -80,12 +86,13 @@
       it in the header. Nothing is published yet, so moving offsets is still free - it stops being free the
       moment a Bloom ships writing this page.
 
-      Bump the version for ANY layout change, even while we are restoring from a local folder, and do not
-      re-pack an existing version with different contents: NuGet caches by id AND version in the global
-      packages folder, so a consumer that has already restored 0.1.0-alpha would happily keep using the old
-      assembly and nothing would look wrong.
+      Bump the version for ANY change anyone has already restored, layout or not, and never re-pack an
+      existing version with different contents: NuGet caches by id AND version in the global packages
+      folder, so a consumer that has already restored 0.1.0-alpha would happily keep using the old assembly
+      and nothing would look wrong. This applies while we are restoring from a local folder just as much as
+      it will once the package is on nuget.org.
     -->
-    <Version>0.3.0-alpha</Version>
+    <Version>0.3.1-alpha</Version>
     <Authors>SIL Global</Authors>
     <Company>SIL Global</Company>
     <Description>
