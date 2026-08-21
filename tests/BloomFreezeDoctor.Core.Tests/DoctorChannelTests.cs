@@ -1,5 +1,7 @@
+using System;
 using System.IO.MemoryMappedFiles;
 using System.Linq;
+using System.Threading;
 using BloomBooks.FreezeDoctor.Protocol;
 using NUnit.Framework;
 
@@ -85,6 +87,7 @@ public class DoctorChannelTests
                 ("ServerBlocked", 64, 4),
                 ("Reserved", 68, 4),
                 ("Activity", 72, 256),
+                ("DebuggerLastDetached", 328, 8),
             };
             Assert.That(
                 DoctorChannelLayout.Fields.Select(f => (f.Name, f.Offset, f.Size)),
@@ -93,13 +96,114 @@ public class DoctorChannelTests
             );
 
             Assert.That(DoctorChannelLayout.ActivityMaxBytes, Is.EqualTo(256), "activity room");
-            Assert.That(DoctorChannelLayout.PayloadBytes, Is.EqualTo(328), "payload extent");
+            Assert.That(DoctorChannelLayout.PayloadBytes, Is.EqualTo(336), "payload extent");
+            // Equal to PayloadBytes only because generation 1 is still unreleased, so there is no older
+            // vintage writing less. It freezes as soon as a Bloom ships writing this page; after that,
+            // appending a field grows PayloadBytes and leaves this alone.
             Assert.That(
                 DoctorChannelLayout.BaselinePayloadBytes,
-                Is.EqualTo(328),
-                "the generation-1 floor, which must never change"
+                Is.EqualTo(336),
+                "the generation-1 floor"
             );
         });
+    }
+
+    [Test]
+    public void A_debugger_that_has_come_and_gone_is_still_remembered()
+    {
+        // The case this exists for. A developer attaches, sits at a breakpoint, detaches; Bloom carries on.
+        // Nothing is attached any more, but there is now a long hole in the UI heartbeat that looks exactly
+        // like a freeze. Without a memory of the debugger, that is a report about nothing.
+        using var writer = new DoctorChannelWriter(TestProcessId);
+
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var fresh), Is.True);
+        Assert.That(fresh!.DebuggerAttached, Is.False, "setup: nothing attached yet");
+        Assert.That(fresh.DebuggerEverAttached, Is.False, "setup: and none ever has been");
+        Assert.That(
+            fresh.DebuggerLastDetachedAge,
+            Is.EqualTo(TimeSpan.MaxValue),
+            "setup: never detached, because never attached"
+        );
+
+        writer.SetDebuggerAttached(true);
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var during), Is.True);
+        Assert.That(during!.DebuggerAttached, Is.True);
+        Assert.That(during.DebuggerEverAttached, Is.True);
+        Assert.That(
+            during.DebuggerLastDetachedAge,
+            Is.EqualTo(TimeSpan.MaxValue),
+            "still attached, so it has not been detached"
+        );
+
+        writer.SetDebuggerAttached(false);
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var after), Is.True);
+        Assert.That(after!.DebuggerAttached, Is.False, "it really has gone");
+        Assert.That(
+            after.DebuggerEverAttached,
+            Is.True,
+            "but the run is still one in which a debugger was attached"
+        );
+        Assert.That(
+            after.DebuggerLastDetachedAge,
+            Is.LessThan(TimeSpan.FromMinutes(1)),
+            "and we know roughly when it went"
+        );
+    }
+
+    [Test]
+    public void A_run_with_no_debugger_never_looks_as_though_one_just_left()
+    {
+        // The mistake worth guarding against: recording the detach timestamp on every call with false
+        // rather than on the transition. It would then always read "detached a moment ago", which would
+        // excuse every freeze ever reported — a suppression that fires for everybody instead of nobody.
+        using var writer = new DoctorChannelWriter(TestProcessId);
+
+        for (var i = 0; i < 5; i++)
+            writer.SetDebuggerAttached(false);
+
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var snapshot), Is.True);
+        Assert.That(snapshot!.DebuggerEverAttached, Is.False);
+        Assert.That(
+            snapshot.DebuggerLastDetachedAge,
+            Is.EqualTo(TimeSpan.MaxValue),
+            "a debugger that was never there cannot have just detached"
+        );
+    }
+
+    [Test]
+    public void Re_attaching_moves_the_detach_time_forward_rather_than_keeping_the_first_one()
+    {
+        // Attach, detach, attach, detach. What matters for judging a gap is the LAST time a debugger left,
+        // not the first, so a stale timestamp must not survive a second visit.
+        using var writer = new DoctorChannelWriter(TestProcessId);
+
+        // Note this compares AGES, each measured at the moment of its own read, so two fresh detaches both
+        // read as roughly zero. What distinguishes them is letting the first one get old first: the age has
+        // to grow while nothing happens, then drop back when a second departure replaces the timestamp.
+        writer.SetDebuggerAttached(true);
+        writer.SetDebuggerAttached(false);
+
+        Thread.Sleep(80);
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var aged), Is.True);
+        var agedAge = aged!.DebuggerLastDetachedAge;
+        Assert.That(
+            agedAge,
+            Is.GreaterThan(TimeSpan.FromMilliseconds(30)),
+            "setup: the recorded time should stay put and therefore age"
+        );
+        Assert.That(agedAge, Is.Not.EqualTo(TimeSpan.MaxValue), "setup: a detach was recorded");
+
+        writer.SetDebuggerAttached(true);
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var reattached), Is.True);
+        Assert.That(reattached!.DebuggerAttached, Is.True, "attached again");
+
+        writer.SetDebuggerAttached(false);
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var second), Is.True);
+        Assert.That(
+            second!.DebuggerLastDetachedAge,
+            Is.LessThan(agedAge),
+            "the second departure should replace the first, not be ignored in favour of it"
+        );
     }
 
     [Test]

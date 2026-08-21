@@ -71,6 +71,11 @@
     -->
     <PackageId>BloomBooks.FreezeDoctor.Protocol</PackageId>
     <!--
+      0.3.0-alpha: a sticky "a debugger has been attached at some point" flag, and the time one was last
+      detached. Appended, so PayloadBytes grew from 328 to 336 - and BaselinePayloadBytes was raised to
+      match, which is only allowed because generation 1 is still unreleased and there is no older writer to
+      stay compatible with. That stops being true the moment a Bloom ships writing this page.
+
       0.2.0-alpha: the shared page gained a PayloadBytes field, and several offsets moved to make room for
       it in the header. Nothing is published yet, so moving offsets is still free - it stops being free the
       moment a Bloom ships writing this page.
@@ -80,7 +85,7 @@
       packages folder, so a consumer that has already restored 0.1.0-alpha would happily keep using the old
       assembly and nothing would look wrong.
     -->
-    <Version>0.2.0-alpha</Version>
+    <Version>0.3.0-alpha</Version>
     <Authors>SIL Global</Authors>
     <Company>SIL Global</Company>
     <Description>

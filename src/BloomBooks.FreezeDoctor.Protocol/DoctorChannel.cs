@@ -94,10 +94,31 @@ public sealed record DoctorChannelSnapshot
     public required bool CleanExitRecorded { get; init; }
 
     /// <summary>
-    /// True if Bloom sees a debugger attached. Authoritative, unlike our outside guess, and the reason a
-    /// developer stopping their debugger never produces a report.
+    /// True if Bloom saw a debugger attached when it last looked (once a second). Authoritative, unlike our
+    /// outside guess, and the reason a developer stopping their debugger never produces a report.
+    ///
+    /// Covers a NATIVE debugger as well as a managed one: Bloom checks the PEB flag alongside
+    /// <c>Debugger.IsAttached</c>, which only sees managed debuggers.
     /// </summary>
     public required bool DebuggerAttached { get; init; }
+
+    /// <summary>
+    /// True if a debugger has been attached at any point in this run, whether or not one is now. **This is
+    /// usually the flag worth acting on, not <see cref="DebuggerAttached"/>**: a debugger that has come and
+    /// gone leaves behind exactly the evidence of a freeze or a crash, and there is nothing left attached to
+    /// explain it.
+    /// </summary>
+    public required bool DebuggerEverAttached { get; init; }
+
+    /// <summary>
+    /// How long ago a debugger was last detached, or <see cref="TimeSpan.MaxValue"/> if none ever has been
+    /// (including while one is still attached).
+    ///
+    /// This is what makes <see cref="DebuggerEverAttached"/> usable without writing off a whole run: compare
+    /// it with the length of the gap being judged, and a debugger that detached hours before a genuine
+    /// freeze stops being an excuse for ignoring it.
+    /// </summary>
+    public required TimeSpan DebuggerLastDetachedAge { get; init; }
 
     /// <summary>
     /// True while Bloom is deliberately busy — publishing, uploading, making a PDF. Raises the Doctor's
@@ -218,6 +239,13 @@ public static class DoctorChannelLayout
     internal const int OffsetActivity = 72;
 
     /// <summary>
+    /// When a debugger was last detached, as <see cref="Environment.TickCount64"/>, or 0 if none ever has
+    /// been. Appended after the activity block, which is why the four reserved bytes above matter: this is
+    /// a 64-bit field and it lands 8-byte aligned.
+    /// </summary>
+    internal const int OffsetDebuggerLastDetached = 328;
+
+    /// <summary>
     /// How much room the activity string gets. Public because it is part of the contract a caller has to
     /// respect: anything longer is truncated rather than allowed to run into the next field.
     ///
@@ -230,15 +258,21 @@ public static class DoctorChannelLayout
     /// One past the last byte a writer of THIS build ever writes, recorded in the page so a reader can
     /// tell how much of it is real. Grows as fields are appended; see the long note above.
     /// </summary>
-    public const int PayloadBytes = OffsetActivity + ActivityMaxBytes;
+    public const int PayloadBytes = OffsetDebuggerLastDetached + sizeof(long);
 
     /// <summary>
-    /// The floor for generation 1: the payload extent of its first release. Every writer in this
-    /// generation provides at least this much, so a reader can always read these fields without checking.
-    /// **Unlike <see cref="PayloadBytes"/>, this must never change** — it is what makes a reader compiled
-    /// against a later, larger layout still able to trust an older Bloom's page.
+    /// The floor for generation 1: the least any writer of this generation provides, so a reader can read
+    /// everything up to here without checking whether it is present.
+    ///
+    /// It is raised to match <see cref="PayloadBytes"/> while generation 1 is **unreleased** — no Bloom has
+    /// shipped writing this page, so there is no older vintage to stay compatible with, and requiring the
+    /// whole layout is simpler and stricter than tolerating a shorter one nobody can produce.
+    ///
+    /// **It freezes the moment a Bloom ships writing this page.** After that, appending a field grows
+    /// PayloadBytes and leaves this alone, and a reader that wants the new field has to check for it — see
+    /// the note above. Raising it after release would make a newer Doctor reject every older Bloom.
     /// </summary>
-    public const int BaselinePayloadBytes = 328;
+    public const int BaselinePayloadBytes = PayloadBytes;
 
     /// <summary>One field's position and extent, for the tests that pin the layout.</summary>
     public readonly record struct FieldExtent(string Name, int Offset, int Size);
@@ -266,11 +300,21 @@ public static class DoctorChannelLayout
             new FieldExtent("ServerBlocked", OffsetServerBlocked, sizeof(int)),
             new FieldExtent("Reserved", OffsetReserved, sizeof(int)),
             new FieldExtent("Activity", OffsetActivity, ActivityMaxBytes),
+            new FieldExtent("DebuggerLastDetached", OffsetDebuggerLastDetached, sizeof(long)),
         };
 
     internal const int FlagCleanExitRecorded = 1 << 0;
     internal const int FlagDebuggerAttached = 1 << 1;
     internal const int FlagLongOperation = 1 << 2;
+
+    /// <summary>
+    /// Set the first time a debugger is seen and never cleared. "Is a debugger attached right now" is not
+    /// the question worth answering: a developer who attaches, sits at a breakpoint for five minutes, and
+    /// detaches leaves a five-minute hole in the UI heartbeat and no debugger in sight, which is a freeze
+    /// report about nothing. Same for a process a debugger terminated — that is a TerminateProcess, so no
+    /// clean exit is recorded and it otherwise looks exactly like an unreported crash.
+    /// </summary>
+    internal const int FlagDebuggerEverAttached = 1 << 3;
 }
 
 /// <summary>
@@ -376,6 +420,11 @@ public static class DoctorChannelReader
             ShutdownPhase = view.ReadInt32(DoctorChannelLayout.OffsetShutdownPhase),
             CleanExitRecorded = (flags & DoctorChannelLayout.FlagCleanExitRecorded) != 0,
             DebuggerAttached = (flags & DoctorChannelLayout.FlagDebuggerAttached) != 0,
+            DebuggerEverAttached = (flags & DoctorChannelLayout.FlagDebuggerEverAttached) != 0,
+            DebuggerLastDetachedAge = AgeOf(
+                view.ReadInt64(DoctorChannelLayout.OffsetDebuggerLastDetached),
+                now
+            ),
             LongOperationInProgress = (flags & DoctorChannelLayout.FlagLongOperation) != 0,
             ServerBusyWorkers = view.ReadInt32(DoctorChannelLayout.OffsetServerBusy),
             ServerBlockedWorkers = view.ReadInt32(DoctorChannelLayout.OffsetServerBlocked),
@@ -504,9 +553,45 @@ public sealed class DoctorChannelWriter : IDisposable
     /// <summary>Marks a deliberately long operation, which buys Bloom patience rather than silence.</summary>
     public void SetLongOperation(bool inProgress) => SetFlag(DoctorChannelLayout.FlagLongOperation, inProgress);
 
-    /// <summary>Publishes whether a debugger is attached, which is authoritative and stops false reports.</summary>
+    /// <summary>
+    /// Publishes whether a debugger is attached, which is authoritative and stops false reports.
+    ///
+    /// This method REMEMBERS, which is the point of it: the first attach also sets a sticky "ever attached"
+    /// flag that is never cleared, and a detach records when it happened. Call it repeatedly — it detects the
+    /// transitions by comparing against what is already in the page, so the caller does not have to track any
+    /// state of its own.
+    ///
+    /// Why remembering matters: a debugger that has come and gone leaves behind precisely the evidence of a
+    /// freeze (a long hole in the UI heartbeat) or of a crash (no clean exit, because terminating from a
+    /// debugger is a TerminateProcess), with nothing still attached to account for it.
+    /// </summary>
     public void SetDebuggerAttached(bool attached) =>
-        SetFlag(DoctorChannelLayout.FlagDebuggerAttached, attached);
+        Write(view =>
+        {
+            var flags = view.ReadInt32(DoctorChannelLayout.OffsetFlags);
+            var wasAttached = (flags & DoctorChannelLayout.FlagDebuggerAttached) != 0;
+
+            if (attached)
+            {
+                flags |=
+                    DoctorChannelLayout.FlagDebuggerAttached
+                    | DoctorChannelLayout.FlagDebuggerEverAttached;
+            }
+            else
+            {
+                flags &= ~DoctorChannelLayout.FlagDebuggerAttached;
+                // Only on the transition. Writing it every time we are called with false would keep moving
+                // the timestamp forward for a run that never had a debugger at all, and "last detached: one
+                // second ago" would then excuse every freeze there ever was.
+                if (wasAttached)
+                    view.Write(
+                        DoctorChannelLayout.OffsetDebuggerLastDetached,
+                        Environment.TickCount64
+                    );
+            }
+
+            view.Write(DoctorChannelLayout.OffsetFlags, flags);
+        });
 
     /// <summary>Records how far shutdown has got.</summary>
     public void SetShutdownPhase(int phase) =>
