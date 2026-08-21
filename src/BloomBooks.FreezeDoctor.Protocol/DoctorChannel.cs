@@ -13,10 +13,19 @@ namespace BloomBooks.FreezeDoctor.Protocol;
 //  in each repository, and they drifted — which is a failure that shows up as confident, wrong reports
 //  rather than as an error, because Bloom writes one set of offsets and the Doctor reads another.
 //
-//  What still has to be done by hand is BUMPING SchemaVersion when the layout changes, and both sides
-//  pin it: the test in this repo asserts the version and offsets by value, and BloomDesktop has a test
-//  asserting the layout it was compiled against. So a version bump that Bloom has not caught up with
-//  fails Bloom's build rather than going quietly.
+//  There are two ways this format changes, and only one of them is a version bump:
+//
+//    * ADDING a field is the likely case. Append it, grow PayloadBytes, leave SchemaVersion alone. Old
+//      readers ignore it; new readers can tell whether an older Bloom wrote it. See the long note on
+//      DoctorChannelLayout.
+//    * MOVING, RESIZING or REPURPOSING a field breaks every existing reader, so it bumps SchemaVersion —
+//      which also changes the section's name, so old Doctors stop finding the channel rather than
+//      misreading it.
+//
+//  Both are pinned by tests rather than trusted to discipline: the tests in this repo assert every offset
+//  by value, assert that PayloadBytes really is the end of the last field, and assert that the writer
+//  never touches a byte beyond it. BloomDesktop has its own test asserting the layout it was compiled
+//  against, so a change Bloom has not caught up with fails Bloom's build rather than going quietly.
 //
 //  Why shared memory rather than a pipe, a socket, or Bloom's own web server: the Doctor has to be able
 //  to read this when Bloom is wedged. A request/response channel needs Bloom to be well enough to
@@ -36,6 +45,15 @@ public sealed record DoctorChannelSnapshot
 {
     /// <summary>Layout version Bloom wrote with.</summary>
     public required int SchemaVersion { get; init; }
+
+    /// <summary>
+    /// How far into the page the Bloom that wrote this actually wrote — one past its last byte. Nothing
+    /// reads it yet, because every Bloom writing this generation writes all of it; it is here so that when
+    /// the layout does grow, a reader can tell a field an older Bloom never wrote from a real zero. A field
+    /// is present only if <c>offset + size &lt;= PayloadBytes</c>. See the note in
+    /// <see cref="DoctorChannelLayout"/>.
+    /// </summary>
+    public required int PayloadBytes { get; init; }
 
     /// <summary>The process this describes.</summary>
     public required int ProcessId { get; init; }
@@ -105,9 +123,14 @@ public sealed record DoctorChannelSnapshot
 public static class DoctorChannelLayout
 {
     /// <summary>
-    /// Bump this only for an incompatible change. The reader refuses anything it does not recognise
-    /// rather than misreading it, so an old Doctor meeting a new Bloom degrades to Tier A instead of
-    /// reporting rubbish.
+    /// The compatibility GENERATION. Bump this only for a change that an older reader could not survive:
+    /// moving a field, resizing one, or reusing it for something else. **Do not bump it to add a field** —
+    /// see <see cref="PayloadBytes"/>, which is how growth is meant to happen.
+    ///
+    /// Note that this number is part of the section's NAME, so a bump does not merely make readers reject
+    /// the page: an old Doctor stops finding a channel at all and degrades to watching from outside, which
+    /// is the right outcome but a total loss of the good data. A reader that wants to support two
+    /// generations has to look for both names deliberately.
     /// </summary>
     public const int SchemaVersion = 1;
 
@@ -121,33 +144,129 @@ public static class DoctorChannelLayout
     public static string NameFor(int processId) =>
         $@"Local\BloomFreezeDoctor.v{SchemaVersion}.{processId}";
 
+    // =================================================================================================
+    //  HOW THIS FORMAT IS MEANT TO GROW
+    //
+    //  Adding a field is by far the likeliest change, so it has its own mechanism and does NOT need a
+    //  SchemaVersion bump. Within one generation the rules are:
+    //
+    //    * Existing fields never move, never change size, and never change meaning. (A test pins every
+    //      offset by value, so breaking this fails the build rather than the field.)
+    //    * New fields are APPENDED at the current PayloadBytes, and PayloadBytes grows to match.
+    //
+    //  The writer records how far it wrote, so a reader can tell what is actually there. The direction
+    //  that needs this is a NEW Doctor reading an OLD Bloom: the page is zero-filled at creation, so a
+    //  field the writer never wrote reads as 0, which is indistinguishable from a real 0. Without
+    //  PayloadBytes a new Doctor would confidently report "0" where the truth is "this Bloom is too old
+    //  to say" — exactly the plausible-but-wrong report this whole design exists to avoid. (The opposite
+    //  direction needs nothing: an old Doctor only ever looks at offsets that append-only growth leaves
+    //  untouched.)
+    //
+    //  That case is the common one in the field, not a curiosity: the Doctor updates itself through
+    //  Velopack while Bloom versions linger on people's machines, and the planned 6.4 backport
+    //  guarantees more than one Bloom vintage writing this page at any given time.
+    //
+    //  The rule for a reader, when there is eventually more than one vintage to handle, is on the END of
+    //  the field and not its start — a field that begins inside the written region but runs past the end
+    //  of it must be treated as absent, not read half-way:
+    //
+    //        readable  <=>  fieldOffset + fieldSize <= snapshot.PayloadBytes
+    //
+    //  Nothing needs that yet, because every Bloom that writes generation 1 writes all of it. It is
+    //  written down, and PayloadBytes is recorded and surfaced on the snapshot, so that the day it is
+    //  needed the data is already there to work from.
+    // =================================================================================================
+
     // The layout. Offsets are explicit rather than computed so a change is visible in a diff.
     internal const int OffsetSchemaVersion = 0;
-    internal const int OffsetProcessId = 4;
+
+    /// <summary>
+    /// Where <see cref="PayloadBytes"/> itself lives. In the header, before anything that can grow,
+    /// because every reader of every future vintage has to be able to find it.
+    /// </summary>
+    internal const int OffsetPayloadBytes = 4;
 
     /// <summary>
     /// A sequence number, incremented before and after every write. Odd means a write is in progress.
     /// The reader takes it before and after reading and retries if it changed, which is what stops it
     /// seeing half of one update and half of the next — mattering most for the strings, since a torn
     /// activity name would be gibberish on a card.
+    ///
+    /// Deliberately 8-byte aligned, which is why the two ints above it come first and ProcessId moved
+    /// below it: an unaligned 64-bit read is not guaranteed to be atomic.
     /// </summary>
     internal const int OffsetWriteSequence = 8;
 
-    internal const int OffsetUiTicks = 16;
-    internal const int OffsetUiTimestamp = 24;
-    internal const int OffsetWatchdogTicks = 32;
-    internal const int OffsetWatchdogTimestamp = 40;
-    internal const int OffsetShutdownPhase = 48;
-    internal const int OffsetFlags = 52;
-    internal const int OffsetServerBusy = 56;
-    internal const int OffsetServerBlocked = 60;
-    internal const int OffsetActivity = 64;
+    internal const int OffsetProcessId = 16;
+    internal const int OffsetShutdownPhase = 20;
+    internal const int OffsetUiTicks = 24;
+    internal const int OffsetUiTimestamp = 32;
+    internal const int OffsetWatchdogTicks = 40;
+    internal const int OffsetWatchdogTimestamp = 48;
+    internal const int OffsetFlags = 56;
+    internal const int OffsetServerBusy = 60;
+    internal const int OffsetServerBlocked = 64;
+
+    /// <summary>
+    /// Four bytes nobody writes, so that the payload ENDS on an 8-byte boundary. Without it the next
+    /// field appended would start at 324 and a 64-bit one would be unaligned, which the writer above
+    /// explains is not safe to read atomically. Cheap now; awkward to retrofit, because fixing it later
+    /// would mean moving a field, which is a generation bump.
+    /// </summary>
+    internal const int OffsetReserved = 68;
+
+    internal const int OffsetActivity = 72;
 
     /// <summary>
     /// How much room the activity string gets. Public because it is part of the contract a caller has to
     /// respect: anything longer is truncated rather than allowed to run into the next field.
+    ///
+    /// Changing this number resizes an existing field, so it is a <see cref="SchemaVersion"/> bump and not
+    /// an additive change.
     /// </summary>
     public const int ActivityMaxBytes = 256;
+
+    /// <summary>
+    /// One past the last byte a writer of THIS build ever writes, recorded in the page so a reader can
+    /// tell how much of it is real. Grows as fields are appended; see the long note above.
+    /// </summary>
+    public const int PayloadBytes = OffsetActivity + ActivityMaxBytes;
+
+    /// <summary>
+    /// The floor for generation 1: the payload extent of its first release. Every writer in this
+    /// generation provides at least this much, so a reader can always read these fields without checking.
+    /// **Unlike <see cref="PayloadBytes"/>, this must never change** — it is what makes a reader compiled
+    /// against a later, larger layout still able to trust an older Bloom's page.
+    /// </summary>
+    public const int BaselinePayloadBytes = 328;
+
+    /// <summary>One field's position and extent, for the tests that pin the layout.</summary>
+    public readonly record struct FieldExtent(string Name, int Offset, int Size);
+
+    /// <summary>
+    /// Every field, in order. This exists so the layout can be *checked* rather than merely described:
+    /// the tests assert each offset by value, that no two fields overlap, that everything fits inside
+    /// <see cref="Size"/>, and that <see cref="PayloadBytes"/> really is the end of the last field — which
+    /// is what catches appending a field and forgetting to grow PayloadBytes.
+    /// </summary>
+    public static IReadOnlyList<FieldExtent> Fields { get; } =
+        new[]
+        {
+            new FieldExtent(nameof(SchemaVersion), OffsetSchemaVersion, sizeof(int)),
+            new FieldExtent(nameof(PayloadBytes), OffsetPayloadBytes, sizeof(int)),
+            new FieldExtent("WriteSequence", OffsetWriteSequence, sizeof(long)),
+            new FieldExtent("ProcessId", OffsetProcessId, sizeof(int)),
+            new FieldExtent("ShutdownPhase", OffsetShutdownPhase, sizeof(int)),
+            new FieldExtent("UiTicks", OffsetUiTicks, sizeof(long)),
+            new FieldExtent("UiTimestamp", OffsetUiTimestamp, sizeof(long)),
+            new FieldExtent("WatchdogTicks", OffsetWatchdogTicks, sizeof(long)),
+            new FieldExtent("WatchdogTimestamp", OffsetWatchdogTimestamp, sizeof(long)),
+            new FieldExtent("Flags", OffsetFlags, sizeof(int)),
+            new FieldExtent("ServerBusy", OffsetServerBusy, sizeof(int)),
+            new FieldExtent("ServerBlocked", OffsetServerBlocked, sizeof(int)),
+            new FieldExtent("Reserved", OffsetReserved, sizeof(int)),
+            new FieldExtent("Activity", OffsetActivity, ActivityMaxBytes),
+        };
 
     internal const int FlagCleanExitRecorded = 1 << 0;
     internal const int FlagDebuggerAttached = 1 << 1;
@@ -216,6 +335,23 @@ public static class DoctorChannelReader
         if (schema != DoctorChannelLayout.SchemaVersion)
             return null;
 
+        // How much of the page the writer filled in. Two things are being rejected here, and the first is
+        // the one that matters most: a section that has been CREATED but not yet initialised is
+        // zero-filled, so it would otherwise present itself as a settled, sane-looking page of zeroes.
+        // (The schema check above catches that too; this is the same guard on the field that will
+        // eventually be load-bearing.) The upper bound catches a value that cannot be true of any writer.
+        //
+        // Note it is compared against the BASELINE and not against our own PayloadBytes: a Doctor built
+        // against a later, larger layout must still accept an older Bloom that wrote less. Requiring our
+        // own extent here would throw away the whole page for the sake of one field we happen to know
+        // about and it does not.
+        var payloadBytes = view.ReadInt32(DoctorChannelLayout.OffsetPayloadBytes);
+        if (
+            payloadBytes < DoctorChannelLayout.BaselinePayloadBytes
+            || payloadBytes > DoctorChannelLayout.Size
+        )
+            return null;
+
         var now = Environment.TickCount64;
         var flags = view.ReadInt32(DoctorChannelLayout.OffsetFlags);
         var activityBytes = new byte[DoctorChannelLayout.ActivityMaxBytes];
@@ -224,6 +360,7 @@ public static class DoctorChannelReader
         return new DoctorChannelSnapshot
         {
             SchemaVersion = schema,
+            PayloadBytes = payloadBytes,
             ProcessId = view.ReadInt32(DoctorChannelLayout.OffsetProcessId),
             UiTicks = view.ReadInt64(DoctorChannelLayout.OffsetUiTicks),
             // Both sides use Environment.TickCount64, which counts since the machine booted and is
@@ -306,6 +443,9 @@ public sealed class DoctorChannelWriter : IDisposable
             );
             _view = _file.CreateViewAccessor(0, DoctorChannelLayout.Size, MemoryMappedFileAccess.ReadWrite);
             _view.Write(DoctorChannelLayout.OffsetSchemaVersion, DoctorChannelLayout.SchemaVersion);
+            // How far this build writes, so a future reader can tell what is really here rather than
+            // reading zero-filled space as data. Written once, at creation, and never changed.
+            _view.Write(DoctorChannelLayout.OffsetPayloadBytes, DoctorChannelLayout.PayloadBytes);
             _view.Write(DoctorChannelLayout.OffsetProcessId, processId);
         }
         catch (Exception)

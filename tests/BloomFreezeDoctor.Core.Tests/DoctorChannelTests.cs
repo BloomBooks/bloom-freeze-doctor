@@ -1,3 +1,5 @@
+using System.IO.MemoryMappedFiles;
+using System.Linq;
 using BloomBooks.FreezeDoctor.Protocol;
 using NUnit.Framework;
 
@@ -14,14 +16,35 @@ namespace BloomFreezeDoctor.Tests;
 ///
 /// Pinning the numbers means changing the layout has to be deliberate here, and BloomDesktop's own test
 /// pins the layout it was compiled against — so Bloom's build fails rather than Bloom quietly publishing
-/// to the wrong place. If you are changing the layout, bump SchemaVersion, update these numbers, and
-/// expect to update Bloom's side too.
+/// to the wrong place.
+///
+/// **Which change you are making decides what you do here.** Adding a field is not a version bump: append
+/// it, grow `PayloadBytes`, and add a line to the pinned list. Moving, resizing or repurposing one breaks
+/// every reader already deployed, so it bumps `SchemaVersion` — and because the version is part of the
+/// section's name, old Doctors then stop finding the channel instead of misreading it.
+///
+/// Four tests guard the additive path, which is the one that gets used: the offsets are pinned by value,
+/// `PayloadBytes` is checked to really be the end of the last field, the writer is checked never to touch a
+/// byte beyond it, and the reader is checked to accept a writer that recorded a smaller extent than this
+/// build knows about. The last of those is the case the mechanism exists for — a self-updating Doctor
+/// reading a Bloom too old to write everything it knows about.
 /// </summary>
 [TestFixture]
 public class DoctorChannelTests
 {
     /// <summary>A pid unlikely to collide with a real Bloom while tests run.</summary>
     private const int TestProcessId = 999_001;
+
+    /// <summary>
+    /// Where PayloadBytes sits, taken from the public field table rather than from the internal constant.
+    /// The table is the layout's public description of itself, so a test in another assembly can work from
+    /// it without the layout having to expose every offset — and doing it this way means these tests
+    /// exercise the table that Bloom's own pinned test also relies on.
+    /// </summary>
+    private static int PayloadBytesOffset =>
+        DoctorChannelLayout
+            .Fields.Single(f => f.Name == nameof(DoctorChannelLayout.PayloadBytes))
+            .Offset;
 
     [Test]
     public void The_layout_is_pinned_so_a_change_cannot_pass_unnoticed()
@@ -38,7 +61,253 @@ public class DoctorChannelTests
                 Is.EqualTo(@"Local\BloomFreezeDoctor.v1.1234"),
                 "the name must stay in the Local namespace, and must include pid and version"
             );
+
+            // Every field, by value. This is the check the whole additive-growth scheme rests on: it is
+            // only safe to append a field without bumping SchemaVersion if the existing fields have
+            // genuinely not moved, and until now nothing verified that at all.
+            //
+            // Appending a field means adding a line HERE as well, which is the intended amount of
+            // friction. MOVING any number already in this list means every deployed reader is wrong, so
+            // it is a SchemaVersion bump, not an edit to the number.
+            var expected = new (string Name, int Offset, int Size)[]
+            {
+                ("SchemaVersion", 0, 4),
+                ("PayloadBytes", 4, 4),
+                ("WriteSequence", 8, 8),
+                ("ProcessId", 16, 4),
+                ("ShutdownPhase", 20, 4),
+                ("UiTicks", 24, 8),
+                ("UiTimestamp", 32, 8),
+                ("WatchdogTicks", 40, 8),
+                ("WatchdogTimestamp", 48, 8),
+                ("Flags", 56, 4),
+                ("ServerBusy", 60, 4),
+                ("ServerBlocked", 64, 4),
+                ("Reserved", 68, 4),
+                ("Activity", 72, 256),
+            };
+            Assert.That(
+                DoctorChannelLayout.Fields.Select(f => (f.Name, f.Offset, f.Size)),
+                Is.EqualTo(expected),
+                "the field layout, pinned by value"
+            );
+
+            Assert.That(DoctorChannelLayout.ActivityMaxBytes, Is.EqualTo(256), "activity room");
+            Assert.That(DoctorChannelLayout.PayloadBytes, Is.EqualTo(328), "payload extent");
+            Assert.That(
+                DoctorChannelLayout.BaselinePayloadBytes,
+                Is.EqualTo(328),
+                "the generation-1 floor, which must never change"
+            );
         });
+    }
+
+    [Test]
+    public void PayloadBytes_is_the_end_of_the_last_field()
+    {
+        // The mistake this catches is appending a field and forgetting to grow PayloadBytes. The field
+        // would then sit outside the written region, so every reader would correctly conclude it was not
+        // there — a new field that silently never arrives, with nothing failing anywhere.
+        var end = DoctorChannelLayout.Fields.Max(f => f.Offset + f.Size);
+
+        Assert.That(
+            DoctorChannelLayout.PayloadBytes,
+            Is.EqualTo(end),
+            "PayloadBytes must be one past the last byte any field occupies"
+        );
+        Assert.That(
+            DoctorChannelLayout.PayloadBytes % 8,
+            Is.Zero,
+            "the payload must end 8-byte aligned, so an appended 64-bit field is aligned too"
+        );
+        Assert.That(
+            DoctorChannelLayout.BaselinePayloadBytes,
+            Is.LessThanOrEqualTo(DoctorChannelLayout.PayloadBytes),
+            "the baseline is a floor; the layout can only grow past it"
+        );
+    }
+
+    [Test]
+    public void No_two_fields_overlap_and_none_escapes_the_page()
+    {
+        // Guards the other half of "existing fields never move": a new field appended at the wrong offset,
+        // or one sized wrongly, would quietly corrupt its neighbour on every write.
+        var ordered = DoctorChannelLayout.Fields.OrderBy(f => f.Offset).ToList();
+
+        Assert.That(ordered, Is.EqualTo(DoctorChannelLayout.Fields), "fields should be declared in order");
+
+        for (var i = 1; i < ordered.Count; i++)
+        {
+            var previous = ordered[i - 1];
+            var current = ordered[i];
+            Assert.That(
+                current.Offset,
+                Is.GreaterThanOrEqualTo(previous.Offset + previous.Size),
+                $"{current.Name} overlaps {previous.Name}"
+            );
+        }
+
+        Assert.That(
+            ordered[^1].Offset + ordered[^1].Size,
+            Is.LessThanOrEqualTo(DoctorChannelLayout.Size),
+            "the last field must fit inside the page"
+        );
+    }
+
+    [Test]
+    public void The_writer_never_touches_a_byte_beyond_PayloadBytes()
+    {
+        // The other way to get PayloadBytes wrong: append a field, write it, and forget to grow the
+        // constant. The layout test above catches that only if the field was added to the Fields table;
+        // this catches it from the other end, by watching what the writer actually does to the page.
+        //
+        // Fill everything past PayloadBytes with a sentinel, exercise every writer method, and require the
+        // tail to come back untouched.
+        using var writer = new DoctorChannelWriter(TestProcessId);
+        Assert.That(writer.IsOpen, Is.True, "setup: the channel should have been created");
+
+        var tailStart = DoctorChannelLayout.PayloadBytes;
+        var tailLength = DoctorChannelLayout.Size - tailStart;
+        Assert.That(tailLength, Is.GreaterThan(0), "setup: there should be spare room to watch");
+
+        using var file = MemoryMappedFile.OpenExisting(
+            DoctorChannelLayout.NameFor(TestProcessId),
+            MemoryMappedFileRights.ReadWrite
+        );
+        using var view = file.CreateViewAccessor(
+            0,
+            DoctorChannelLayout.Size,
+            MemoryMappedFileAccess.ReadWrite
+        );
+
+        var sentinel = new byte[tailLength];
+        for (var i = 0; i < sentinel.Length; i++)
+            sentinel[i] = 0xAB;
+        view.WriteArray(tailStart, sentinel, 0, sentinel.Length);
+
+        // Sanity check the sentinel actually landed, so a test that cannot fail is not mistaken for a pass.
+        var planted = new byte[tailLength];
+        view.ReadArray(tailStart, planted, 0, planted.Length);
+        Assert.That(planted, Is.EqualTo(sentinel), "setup: the sentinel should have been written");
+
+        // Everything the writer can do, including an activity far longer than its field, which is the most
+        // likely thing to run off the end.
+        writer.RecordUiTick();
+        writer.RecordWatchdogTick();
+        writer.SetActivity(new string('x', DoctorChannelLayout.ActivityMaxBytes * 4));
+        writer.SetActivity("Publishing to BloomPUB");
+        writer.SetLongOperation(true);
+        writer.SetDebuggerAttached(true);
+        writer.SetShutdownPhase(3);
+        writer.SetServerWorkerCounts(5, 6);
+        writer.RecordCleanExit();
+
+        var after = new byte[tailLength];
+        view.ReadArray(tailStart, after, 0, after.Length);
+        Assert.That(
+            after,
+            Is.EqualTo(sentinel),
+            "the writer wrote past PayloadBytes: either grow the constant or fix the write"
+        );
+    }
+
+    [Test]
+    public void A_reader_rejects_a_page_whose_payload_extent_is_impossible()
+    {
+        // A created-but-uninitialised section is zero-filled, and a page of zeroes otherwise looks settled
+        // and sane. It must never be read as data.
+        using var writer = new DoctorChannelWriter(TestProcessId);
+        Assert.That(
+            DoctorChannelReader.TryRead(TestProcessId, out var good),
+            Is.True,
+            "setup: a real channel should read"
+        );
+        Assert.That(
+            good!.PayloadBytes,
+            Is.EqualTo(DoctorChannelLayout.PayloadBytes),
+            "setup: the writer should have recorded its extent"
+        );
+
+        using var file = MemoryMappedFile.OpenExisting(
+            DoctorChannelLayout.NameFor(TestProcessId),
+            MemoryMappedFileRights.ReadWrite
+        );
+        using var view = file.CreateViewAccessor(
+            0,
+            DoctorChannelLayout.Size,
+            MemoryMappedFileAccess.ReadWrite
+        );
+
+        // Too small to hold the generation-1 fields we are about to read.
+        view.Write(PayloadBytesOffset, DoctorChannelLayout.BaselinePayloadBytes - 1);
+        Assert.That(
+            DoctorChannelReader.TryRead(TestProcessId, out _),
+            Is.False,
+            "a payload smaller than the baseline cannot be trusted"
+        );
+
+        // Zero, which is what an uninitialised page says.
+        view.Write(PayloadBytesOffset, 0);
+        Assert.That(
+            DoctorChannelReader.TryRead(TestProcessId, out _),
+            Is.False,
+            "an uninitialised page must not read as data"
+        );
+
+        // Bigger than the page itself.
+        view.Write(PayloadBytesOffset, DoctorChannelLayout.Size + 8);
+        Assert.That(
+            DoctorChannelReader.TryRead(TestProcessId, out _),
+            Is.False,
+            "a payload larger than the page is impossible"
+        );
+
+        // And it recovers once the value is sane again, so the rejection is about the value and not a
+        // one-way latch.
+        view.Write(PayloadBytesOffset, DoctorChannelLayout.PayloadBytes);
+        Assert.That(
+            DoctorChannelReader.TryRead(TestProcessId, out _),
+            Is.True,
+            "a sane extent should read again"
+        );
+    }
+
+    [Test]
+    public void A_reader_built_against_a_larger_layout_still_accepts_an_older_writer()
+    {
+        // The case the whole scheme exists for: a Doctor that knows about fields a Bloom is too old to
+        // write. It must read what IS there rather than rejecting the page. Simulated by writing an extent
+        // equal to the baseline, which is what such a Bloom would record.
+        using var writer = new DoctorChannelWriter(TestProcessId);
+        writer.SetActivity("Saving Foo.htm");
+        writer.RecordUiTick();
+
+        using var file = MemoryMappedFile.OpenExisting(
+            DoctorChannelLayout.NameFor(TestProcessId),
+            MemoryMappedFileRights.ReadWrite
+        );
+        using var view = file.CreateViewAccessor(
+            0,
+            DoctorChannelLayout.Size,
+            MemoryMappedFileAccess.ReadWrite
+        );
+        view.Write(
+            PayloadBytesOffset,
+            DoctorChannelLayout.BaselinePayloadBytes
+        );
+
+        Assert.That(DoctorChannelReader.TryRead(TestProcessId, out var snapshot), Is.True);
+        Assert.That(
+            snapshot!.PayloadBytes,
+            Is.EqualTo(DoctorChannelLayout.BaselinePayloadBytes),
+            "the reader should report what the writer claimed, not its own extent"
+        );
+        Assert.That(
+            snapshot.Activity,
+            Is.EqualTo("Saving Foo.htm"),
+            "the fields that ARE present must still be read"
+        );
+        Assert.That(snapshot.UiTicks, Is.EqualTo(1));
     }
 
     [Test]

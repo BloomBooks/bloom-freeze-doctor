@@ -70,7 +70,17 @@
       good. Hence review first.
     -->
     <PackageId>BloomBooks.FreezeDoctor.Protocol</PackageId>
-    <Version>0.1.0-alpha</Version>
+    <!--
+      0.2.0-alpha: the shared page gained a PayloadBytes field, and several offsets moved to make room for
+      it in the header. Nothing is published yet, so moving offsets is still free - it stops being free the
+      moment a Bloom ships writing this page.
+
+      Bump the version for ANY layout change, even while we are restoring from a local folder, and do not
+      re-pack an existing version with different contents: NuGet caches by id AND version in the global
+      packages folder, so a consumer that has already restored 0.1.0-alpha would happily keep using the old
+      assembly and nothing would look wrong.
+    -->
+    <Version>0.2.0-alpha</Version>
     <Authors>SIL Global</Authors>
     <Company>SIL Global</Company>
     <Description>
