@@ -34,6 +34,32 @@ jobs:
               # release rather than merely be noted.
               run: dotnet test --configuration Release --no-build --verbosity normal
 
+            # The shared protocol, packed as a NuGet package so BloomDesktop can reference it instead
+            # of keeping its own copy of the same 750 lines. See src/BloomBooks.FreezeDoctor.Protocol.
+            #
+            # THERE IS DELIBERATELY NO PUSH STEP YET. A push to nuget.org cannot be undone: a version
+            # is permanent and the package id is claimed for good. So this only produces the package and
+            # keeps it as a build artifact, which is enough to review the shape of it and to prove it
+            # packs on every build. Until publishing is wired up, BloomDesktop still holds copies,
+            # guarded by a drift check.
+            #
+            # When it is wired up, the decision already taken is: push to nuget.org and then UNLIST the
+            # version, so it is absent from search and browse but still restores for a consumer that
+            # pins an exact version. See the long note in the .csproj for why not a private feed. The
+            # version should come from the tag at that point, rather than from the csproj, so that a
+            # released Doctor and the package Bloom references line up.
+            - name: Pack the shared protocol package (artifact only, never pushed)
+              run: >
+                  dotnet pack src/BloomBooks.FreezeDoctor.Protocol/BloomBooks.FreezeDoctor.Protocol.csproj
+                  --configuration Release
+                  --output nuget-package
+
+            - name: Keep the protocol package for inspection
+              uses: actions/upload-artifact@v4
+              with:
+                  name: protocol-package
+                  path: nuget-package/*
+
             - name: Publish the Doctor
               run: >
                   dotnet publish src/BloomFreezeDoctor/BloomFreezeDoctor.csproj

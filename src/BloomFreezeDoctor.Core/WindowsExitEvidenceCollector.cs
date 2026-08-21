@@ -38,7 +38,7 @@ public sealed class WindowsExitEvidenceCollector
         DateTime startedAt,
         string? logPath,
         int? exitCode,
-        bool everDebugged,
+        bool debuggerCouldExplainIt,
         bool neverFile,
         bool? cleanExitProofPresent = null,
         int? shutdownPhaseReached = null
@@ -47,7 +47,7 @@ public sealed class WindowsExitEvidenceCollector
         return new ExitEvidence
         {
             ExitCode = exitCode,
-            EverDebugged = everDebugged,
+            DebuggerCouldExplainIt = debuggerCouldExplainIt,
             NeverFile = neverFile,
             CleanExitProofPresent = cleanExitProofPresent,
             ShutdownPhaseReached = shutdownPhaseReached,

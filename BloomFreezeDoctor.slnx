@@ -4,6 +4,7 @@
     <Project Path="spike/Probe/Probe.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/BloomBooks.FreezeDoctor.Protocol/BloomBooks.FreezeDoctor.Protocol.csproj" />
     <Project Path="src/BloomFreezeDoctor.Core/BloomFreezeDoctor.Core.csproj" />
     <Project Path="src/BloomFreezeDoctor/BloomFreezeDoctor.csproj" />
   </Folder>

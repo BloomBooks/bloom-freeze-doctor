@@ -202,12 +202,21 @@ public class FreezeDetectorTests
     }
 
     [Test]
-    public void A_debugged_process_is_poisoned_for_good_even_after_the_debugger_detaches()
+    public void A_debugged_process_stays_poisoned_when_we_cannot_tell_when_the_debugger_left()
     {
         // Stopping the debugger is a hard kill leaving no proof of shutdown, and it is the most
         // common thing a developer does all day. Asking a dead process about its debugger is
-        // impossible, so the flag has to be sticky.
-        _detector.Observe(Healthy(0) with { DebuggerAttached = true });
+        // impossible, so with no departure time to work from the flag has to stay sticky.
+        //
+        // This is what a Bloom too old to publish a channel gets, and what our own outside sampling gets:
+        // "one was here, no idea when it went" has to mean "assume it is still relevant".
+        _detector.Observe(
+            Healthy(0) with
+            {
+                DebuggerAttachedNow = true,
+                DebuggerEverAttached = true,
+            }
+        );
         Assert.That(_detector.IsPoisonedByDebugger, Is.True, "setup: should be flagged immediately");
 
         RunSeconds(1, 60, NotResponding); // debugger no longer reported attached
@@ -215,7 +224,119 @@ public class FreezeDetectorTests
         Assert.That(
             _detector.IsPoisonedByDebugger,
             Is.True,
-            "a target seen under a debugger must stay untrustworthy for the rest of its life"
+            "with no departure time, a target seen under a debugger stays untrustworthy"
+        );
+    }
+
+    [Test]
+    public void A_debugger_that_left_long_before_the_freeze_does_not_excuse_it()
+    {
+        // The case the old permanent poison got wrong, and the reason Bloom now records WHEN a debugger
+        // left. Attach a debugger in the morning, detach it, and hours later Bloom genuinely freezes: that
+        // freeze is real, and it is happening on the machine of somebody well placed to help diagnose it.
+        // Writing off the rest of the run threw exactly that report away.
+        _detector.Observe(
+            Healthy(0) with
+            {
+                DebuggerAttachedNow = true,
+                DebuggerEverAttached = true,
+            }
+        );
+        Assert.That(_detector.IsPoisonedByDebugger, Is.True, "setup: attached, so poisoned");
+
+        // It leaves. Note that immediately after a detach it is still poisoned, and rightly so — the margin
+        // exists because handing Bloom back is not instant. Once the departure is older than the margin and
+        // nothing is wrong, there is nothing left for it to explain.
+        _detector.Observe(
+            Healthy(1) with
+            {
+                DebuggerEverAttached = true,
+                DebuggerLastDetachedAge = TimeSpan.FromMinutes(5),
+            }
+        );
+        Assert.That(
+            _detector.IsPoisonedByDebugger,
+            Is.False,
+            "gone five minutes, and Bloom is healthy: nothing for it to account for"
+        );
+
+        // Now a freeze, long after the debugger's departure. The departure is much older than the freeze.
+        RunSeconds(
+            2,
+            90,
+            t =>
+                NotResponding(t) with
+                {
+                    DebuggerEverAttached = true,
+                    DebuggerLastDetachedAge = TimeSpan.FromHours(3),
+                }
+        );
+
+        Assert.That(
+            _detector.IsPoisonedByDebugger,
+            Is.False,
+            "a debugger that left three hours before this freeze began cannot account for it"
+        );
+        Assert.That(
+            _detector.State,
+            Is.EqualTo(TargetState.Frozen),
+            "sanity: the freeze itself should still have been detected"
+        );
+    }
+
+    [Test]
+    public void A_debugger_that_left_during_the_freeze_does_excuse_it()
+    {
+        // The other direction, and the one that must not regress: a developer sitting at a breakpoint
+        // produces a heartbeat gap indistinguishable from a freeze. If they detach while it is still
+        // running, the gap is already there and the debugger is what caused it.
+        RunSeconds(
+            0,
+            90,
+            t =>
+                NotResponding(t) with
+                {
+                    DebuggerEverAttached = true,
+                    // It left ten seconds ago; the gap has been growing for ninety.
+                    DebuggerLastDetachedAge = TimeSpan.FromSeconds(10),
+                }
+        );
+
+        Assert.That(
+            _detector.IsPoisonedByDebugger,
+            Is.True,
+            "the debugger was still attached when this episode began, so it explains it"
+        );
+    }
+
+    [Test]
+    public void A_debugger_still_attached_when_the_process_died_explains_the_death()
+    {
+        // Terminating from a debugger is a TerminateProcess: no clean-exit proof, so it looks exactly like
+        // an unreported crash. Bloom cannot record a detach because Bloom is already gone — so what the
+        // probe reports is the last state it saw, which still says "attached".
+        _detector.Observe(
+            Healthy(0) with
+            {
+                DebuggerAttachedNow = true,
+                DebuggerEverAttached = true,
+            }
+        );
+
+        var verdict = _detector.Observe(
+            Healthy(1) with
+            {
+                IsAlive = false,
+                DebuggerAttachedNow = true,
+                DebuggerEverAttached = true,
+            }
+        );
+
+        Assert.That(verdict.State, Is.EqualTo(TargetState.Exited), "sanity: it noticed the exit");
+        Assert.That(
+            _detector.IsPoisonedByDebugger,
+            Is.True,
+            "a debugger attached at the moment of death is the likeliest reason for it"
         );
     }
 

@@ -20,7 +20,7 @@ public class ZombieEnderTests
             State = TargetState.Zombie,
             ReportGathered = true,
             SinceDetected = ZombieEnder.GracePeriod + TimeSpan.FromSeconds(5),
-            EverDebugged = false,
+            DebuggerCouldExplainIt = false,
             WorkInProgress = false,
             DisabledBySetting = false,
         };
@@ -99,7 +99,7 @@ public class ZombieEnderTests
     public void A_debugged_Bloom_is_not_ours_to_end()
     {
         // A developer's paused Bloom looks a great deal like a zombie.
-        var decision = ZombieEnder.Decide(AGenuineZombie() with { EverDebugged = true });
+        var decision = ZombieEnder.Decide(AGenuineZombie() with { DebuggerCouldExplainIt = true });
 
         Assert.That(decision.ShouldEnd, Is.False);
         Assert.That(decision.Explanation, Does.Contain("debugger"));

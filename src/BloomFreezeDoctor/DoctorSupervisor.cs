@@ -2,6 +2,10 @@ using System.Diagnostics;
 using BloomFreezeDoctor.Gathering;
 using BloomFreezeDoctor.Outbox;
 
+// Aliased rather than imported plainly, so uses below still read as Protocol.DoctorSignals - it is worth
+// saying at each use that this is the shared wire format, not something local to the Doctor.
+using Protocol = BloomBooks.FreezeDoctor.Protocol;
+
 namespace BloomFreezeDoctor;
 
 /// <summary>What the window needs to render, published by the supervisor as things change.</summary>
@@ -356,7 +360,7 @@ public sealed class DoctorSupervisor : IDisposable
             {
                 try
                 {
-                    var session = Contract.DoctorSessionStore.TryRead(watcher.Target.ProcessId);
+                    var session = Protocol.DoctorSessionStore.TryRead(watcher.Target.ProcessId);
                     probe.TryGetExitCode(out var exitCode);
                     var diedAt = probe.ExitedAt ?? DateTime.Now;
 
@@ -494,7 +498,7 @@ public sealed class DoctorSupervisor : IDisposable
                     State = verdict.State,
                     ReportGathered = true,
                     SinceDetected = DateTimeOffset.UtcNow - watcher.ZombieSince.Value,
-                    EverDebugged = watcher.IsPoisonedByDebugger,
+                    DebuggerCouldExplainIt = watcher.IsPoisonedByDebugger,
                     WorkInProgress = LooksLikeWorkInProgress(watcher.Target.ProcessId),
                     DisabledBySetting = _neverEndZombies,
                 }
@@ -527,7 +531,7 @@ public sealed class DoctorSupervisor : IDisposable
     {
         try
         {
-            if (!Contract.DoctorChannelReader.TryRead(processId, out var state) || state == null)
+            if (!Protocol.DoctorChannelReader.TryRead(processId, out var state) || state == null)
                 return false;
             if (state.LongOperationInProgress)
                 return true;

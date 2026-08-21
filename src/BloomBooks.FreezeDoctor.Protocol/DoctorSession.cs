@@ -1,18 +1,13 @@
-// Explicit usings and nullable context: this file is copied into BloomDesktop, which has neither
-// ImplicitUsings nor nullable enabled. See DoctorChannel.cs for the full explanation.
-#nullable enable
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace BloomFreezeDoctor.Contract;
+namespace BloomBooks.FreezeDoctor.Protocol;
 
 // =====================================================================================================
-//  SECOND HALF OF THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR. COPIED INTO BOTH REPOS.
-//
-//  Source of truth: BloomBooks/bloom-freeze-doctor, src/BloomFreezeDoctor.Core/Contract/DoctorSession.cs
+//  SECOND HALF OF THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR.
 //
 //  DoctorChannel.cs carries what changes moment to moment, in shared memory. This file carries the facts
 //  that do not change, and — crucially — the ones that must OUTLIVE the process. Shared memory dies when

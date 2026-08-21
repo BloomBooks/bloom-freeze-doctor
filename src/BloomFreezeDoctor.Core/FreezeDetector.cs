@@ -71,10 +71,28 @@ public readonly record struct TargetObservation
     public bool UiBlockCorroborated { get; init; }
 
     /// <summary>
-    /// A debugger is attached right now. The detector makes this sticky, because a dead process
-    /// cannot be asked and a developer who stops the debugger must never generate a report.
+    /// A debugger is attached at this moment. For a process that has already died this is the last thing
+    /// Bloom published before it went, which is what covers the case of a debugger *terminating* Bloom:
+    /// that is a TerminateProcess, so Bloom never gets to record a detach, and the page it leaves behind
+    /// still says a debugger was there.
     /// </summary>
-    public bool DebuggerAttached { get; init; }
+    public bool DebuggerAttachedNow { get; init; }
+
+    /// <summary>
+    /// A debugger has been attached at some point in this Bloom's life, whether or not one is now. Taken
+    /// from Bloom's own sticky flag when Bloom publishes a channel — authoritative, and it covers the whole
+    /// run rather than only the part the Doctor was watching — and otherwise from our own outside sampling.
+    /// </summary>
+    public bool DebuggerEverAttached { get; init; }
+
+    /// <summary>
+    /// How long ago a debugger was last detached, or **null when that cannot be known**: no published
+    /// channel, or one is still attached, or none ever was.
+    ///
+    /// This is what stops <see cref="DebuggerEverAttached"/> writing off a whole run. Null is treated as
+    /// "assume it overlaps", so a Bloom that publishes nothing behaves exactly as it did before.
+    /// </summary>
+    public TimeSpan? DebuggerLastDetachedAge { get; init; }
 
     /// <summary>
     /// Tier B only: Bloom says it is deliberately busy (publishing, uploading, making a PDF). Raises
@@ -118,6 +136,18 @@ public sealed record DetectorThresholds
     /// and gets restarted rather than accumulated.
     /// </summary>
     public TimeSpan ImplausibleGap { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How much slack to give a departed debugger when deciding whether it can account for the episode
+    /// being judged.
+    ///
+    /// The comparison is "did the debugger leave before this episode began?", and it wants slack in one
+    /// direction: detaching does not always hand Bloom back instantly, so a UI thread can still be
+    /// catching up for a while afterwards, and our own once-a-second sampling puts a second of slop on
+    /// every timestamp anyway. Generous on purpose — the cost of being too generous is one unreported
+    /// freeze on a developer's machine, and the cost of being too mean is a bogus card.
+    /// </summary>
+    public TimeSpan DebuggerOverlapMargin { get; init; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>Why the detector is asking for a report; becomes the shape of the card.</summary>
@@ -196,6 +226,17 @@ public sealed class FreezeDetector
     /// exactly like the crash we are hunting.
     /// </summary>
     private bool _everDebugged;
+    private bool _debuggerAttachedNow;
+    private TimeSpan? _debuggerLastDetachedAge;
+
+    /// <summary>
+    /// How long the episode we would currently report has been running — the unresponsive or windowless
+    /// time, whichever is doing the reporting. Kept so <see cref="IsPoisonedByDebugger"/> can ask whether a
+    /// departed debugger was still around when it began. Zero when nothing is wrong, which makes the
+    /// comparison strict: only a debugger that left within the margin excuses a process that was healthy
+    /// right up to the end.
+    /// </summary>
+    private TimeSpan _episodeLength;
 
     private readonly HashSet<ReportReason> _alreadyReported = new();
 
@@ -209,10 +250,42 @@ public sealed class FreezeDetector
     public TargetState State { get; private set; } = TargetState.Healthy;
 
     /// <summary>
-    /// True if this target has ever been seen under a debugger, and therefore must never be
+    /// True if a debugger can account for what we are looking at, and therefore nothing should be
     /// reported. Exposed so the gatherer can say why it declined, rather than silently doing nothing.
+    ///
+    /// **This used to mean "a debugger has been attached at some point in this run", which wrote off the
+    /// whole run.** Attach a debugger once in the morning and a genuine freeze that afternoon went
+    /// unreported for ever — on precisely the machines whose owners are best placed to diagnose it. Now
+    /// that Bloom records *when* a debugger last left, the question can be the narrower and more useful
+    /// one: was a debugger around while THIS episode was happening?
+    ///
+    /// The three answers, in order:
+    ///
+    ///   * A debugger is attached now — nothing to discuss. This also covers a debugger that terminated
+    ///     Bloom, since the page Bloom leaves behind still says one was attached.
+    ///   * One was attached but we cannot tell when it left — assume it overlaps. That is the old
+    ///     behaviour, and it is what a Bloom too old to publish a channel still gets.
+    ///   * One was attached and we know when it left — it only excuses an episode that had already
+    ///     started by then.
     /// </summary>
-    public bool IsPoisonedByDebugger => _everDebugged;
+    public bool IsPoisonedByDebugger
+    {
+        get
+        {
+            if (_debuggerAttachedNow)
+                return true;
+            if (!_everDebugged)
+                return false;
+            if (!_debuggerLastDetachedAge.HasValue)
+                return true;
+
+            // Both of these are ages, so the arithmetic is the other way round from how it reads: a
+            // debugger that left LONGER ago than the episode has been running left BEFORE it started, and
+            // therefore explains nothing.
+            return _debuggerLastDetachedAge.Value
+                <= _episodeLength + _thresholds.DebuggerOverlapMargin;
+        }
+    }
 
     /// <summary>
     /// Feeds one observation in and gets back what to do about it. Call this on a steady cadence
@@ -221,8 +294,16 @@ public sealed class FreezeDetector
     /// </summary>
     public DetectorVerdict Observe(TargetObservation now)
     {
-        if (now.DebuggerAttached)
+        // Latched rather than merely copied: Bloom's own flag is sticky and survives, but our outside
+        // sampling of a Bloom that publishes nothing is a series of instants, and an attach we saw once
+        // must not be forgotten a second later.
+        _debuggerAttachedNow = now.DebuggerAttachedNow;
+        if (now.DebuggerAttachedNow || now.DebuggerEverAttached)
             _everDebugged = true;
+        // Only ever moves forward to a *more recent* departure; a null here means "still attached" or
+        // "unknowable", neither of which should erase a time we already learned.
+        if (now.DebuggerLastDetachedAge.HasValue)
+            _debuggerLastDetachedAge = now.DebuggerLastDetachedAge;
 
         // A gap far larger than our cadence means the world stopped: the machine slept, or something
         // starved the Doctor. Elapsed unresponsive time measured across such a gap is meaningless, so
@@ -254,6 +335,12 @@ public sealed class FreezeDetector
 
         var unresponsiveFor = now.Uptime - _lastRespondedAt.Value;
         var windowlessFor = now.Uptime - _lastHadWindowAt.Value;
+
+        // How long something has been wrong, for the debugger-overlap question. The LONGER of the two,
+        // deliberately: a longer episode is more easily excused by a departed debugger, so taking the
+        // larger errs toward staying quiet. Note this is left alone on the dead-process path below, which
+        // is what makes "died while frozen" keep the freeze's length rather than resetting to nothing.
+        _episodeLength = unresponsiveFor > windowlessFor ? unresponsiveFor : windowlessFor;
 
         // Zombie is checked first, because a process with no window cannot meaningfully be called
         // unresponsive: there is nothing left to send a message to.

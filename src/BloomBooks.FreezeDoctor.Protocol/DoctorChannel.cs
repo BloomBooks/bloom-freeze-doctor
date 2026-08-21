@@ -1,30 +1,31 @@
-// Explicit usings and an explicit nullable context, rather than relying on the project's settings.
-// This file is copied into BloomDesktop, which has neither ImplicitUsings nor nullable enabled, so
-// depending on them would mean the copy had to be edited on the way in — and a file that has to be
-// edited on the way in is a file that will drift.
-#nullable enable
 using System;
 using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Text;
 
-namespace BloomFreezeDoctor.Contract;
+namespace BloomBooks.FreezeDoctor.Protocol;
 
 // =====================================================================================================
-//  THIS FILE IS THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR, AND IT IS COPIED INTO BOTH REPOS.
+//  THIS FILE IS THE CONTRACT BETWEEN BLOOM AND THE FREEZE DOCTOR.
 //
-//  Source of truth: BloomBooks/bloom-freeze-doctor, src/BloomFreezeDoctor.Core/Contract/DoctorChannel.cs
-//  The two copies must agree on everything except the namespace. They are NOT byte-identical: the two
-//  repos' formatters disagree about where to wrap a few long lines, so the comparison ignores
-//  whitespace. Two nets catch a drift: build/check-freeze-doctor-contract.sh compares the copies on
-//  every PR that touches them, and each repo has a test pinning SchemaVersion and the field offsets by
-//  value. Both exist because a drift here fails silently — Bloom writes one set of offsets, the Doctor
-//  reads another, and the resulting reports are confident and wrong.
+//  Both programs must agree about this layout exactly, so there is deliberately only ONE definition of
+//  it: this project is published as a NuGet package and BloomDesktop references it. It used to be a copy
+//  in each repository, and they drifted — which is a failure that shows up as confident, wrong reports
+//  rather than as an error, because Bloom writes one set of offsets and the Doctor reads another.
 //
-//  ALL OF THAT IS A WORKAROUND FOR THESE BEING COPIES AT ALL. The intended end state is to publish this
-//  as a NuGet package from the Doctor's repo and delete Bloom's copies, at which point the script goes
-//  too. It is not done yet because the format is still settling and a publish round-trip on every edit
-//  would cost more than it saves; the moment to do it is the Doctor's first packaged release.
+//  There are two ways this format changes, and only one of them is a version bump:
+//
+//    * ADDING a field is the likely case. Append it, grow PayloadBytes, leave SchemaVersion alone. Old
+//      readers ignore it; new readers can tell whether an older Bloom wrote it. See the long note on
+//      DoctorChannelLayout.
+//    * MOVING, RESIZING or REPURPOSING a field breaks every existing reader, so it bumps SchemaVersion —
+//      which also changes the section's name, so old Doctors stop finding the channel rather than
+//      misreading it.
+//
+//  Both are pinned by tests rather than trusted to discipline: the tests in this repo assert every offset
+//  by value, assert that PayloadBytes really is the end of the last field, and assert that the writer
+//  never touches a byte beyond it. BloomDesktop has its own test asserting the layout it was compiled
+//  against, so a change Bloom has not caught up with fails Bloom's build rather than going quietly.
 //
 //  Why shared memory rather than a pipe, a socket, or Bloom's own web server: the Doctor has to be able
 //  to read this when Bloom is wedged. A request/response channel needs Bloom to be well enough to
@@ -44,6 +45,15 @@ public sealed record DoctorChannelSnapshot
 {
     /// <summary>Layout version Bloom wrote with.</summary>
     public required int SchemaVersion { get; init; }
+
+    /// <summary>
+    /// How far into the page the Bloom that wrote this actually wrote — one past its last byte. Nothing
+    /// reads it yet, because every Bloom writing this generation writes all of it; it is here so that when
+    /// the layout does grow, a reader can tell a field an older Bloom never wrote from a real zero. A field
+    /// is present only if <c>offset + size &lt;= PayloadBytes</c>. See the note in
+    /// <see cref="DoctorChannelLayout"/>.
+    /// </summary>
+    public required int PayloadBytes { get; init; }
 
     /// <summary>The process this describes.</summary>
     public required int ProcessId { get; init; }
@@ -84,10 +94,31 @@ public sealed record DoctorChannelSnapshot
     public required bool CleanExitRecorded { get; init; }
 
     /// <summary>
-    /// True if Bloom sees a debugger attached. Authoritative, unlike our outside guess, and the reason a
-    /// developer stopping their debugger never produces a report.
+    /// True if Bloom saw a debugger attached when it last looked (once a second). Authoritative, unlike our
+    /// outside guess, and the reason a developer stopping their debugger never produces a report.
+    ///
+    /// Covers a NATIVE debugger as well as a managed one: Bloom checks the PEB flag alongside
+    /// <c>Debugger.IsAttached</c>, which only sees managed debuggers.
     /// </summary>
     public required bool DebuggerAttached { get; init; }
+
+    /// <summary>
+    /// True if a debugger has been attached at any point in this run, whether or not one is now. **This is
+    /// usually the flag worth acting on, not <see cref="DebuggerAttached"/>**: a debugger that has come and
+    /// gone leaves behind exactly the evidence of a freeze or a crash, and there is nothing left attached to
+    /// explain it.
+    /// </summary>
+    public required bool DebuggerEverAttached { get; init; }
+
+    /// <summary>
+    /// How long ago a debugger was last detached, or <see cref="TimeSpan.MaxValue"/> if none ever has been
+    /// (including while one is still attached).
+    ///
+    /// This is what makes <see cref="DebuggerEverAttached"/> usable without writing off a whole run: compare
+    /// it with the length of the gap being judged, and a debugger that detached hours before a genuine
+    /// freeze stops being an excuse for ignoring it.
+    /// </summary>
+    public required TimeSpan DebuggerLastDetachedAge { get; init; }
 
     /// <summary>
     /// True while Bloom is deliberately busy — publishing, uploading, making a PDF. Raises the Doctor's
@@ -113,9 +144,14 @@ public sealed record DoctorChannelSnapshot
 public static class DoctorChannelLayout
 {
     /// <summary>
-    /// Bump this only for an incompatible change. The reader refuses anything it does not recognise
-    /// rather than misreading it, so an old Doctor meeting a new Bloom degrades to Tier A instead of
-    /// reporting rubbish.
+    /// The compatibility GENERATION. Bump this only for a change that an older reader could not survive:
+    /// moving a field, resizing one, or reusing it for something else. **Do not bump it to add a field** —
+    /// see <see cref="PayloadBytes"/>, which is how growth is meant to happen.
+    ///
+    /// Note that this number is part of the section's NAME, so a bump does not merely make readers reject
+    /// the page: an old Doctor stops finding a channel at all and degrades to watching from outside, which
+    /// is the right outcome but a total loss of the good data. A reader that wants to support two
+    /// generations has to look for both names deliberately.
     /// </summary>
     public const int SchemaVersion = 1;
 
@@ -129,37 +165,156 @@ public static class DoctorChannelLayout
     public static string NameFor(int processId) =>
         $@"Local\BloomFreezeDoctor.v{SchemaVersion}.{processId}";
 
+    // =================================================================================================
+    //  HOW THIS FORMAT IS MEANT TO GROW
+    //
+    //  Adding a field is by far the likeliest change, so it has its own mechanism and does NOT need a
+    //  SchemaVersion bump. Within one generation the rules are:
+    //
+    //    * Existing fields never move, never change size, and never change meaning. (A test pins every
+    //      offset by value, so breaking this fails the build rather than the field.)
+    //    * New fields are APPENDED at the current PayloadBytes, and PayloadBytes grows to match.
+    //
+    //  The writer records how far it wrote, so a reader can tell what is actually there. The direction
+    //  that needs this is a NEW Doctor reading an OLD Bloom: the page is zero-filled at creation, so a
+    //  field the writer never wrote reads as 0, which is indistinguishable from a real 0. Without
+    //  PayloadBytes a new Doctor would confidently report "0" where the truth is "this Bloom is too old
+    //  to say" — exactly the plausible-but-wrong report this whole design exists to avoid. (The opposite
+    //  direction needs nothing: an old Doctor only ever looks at offsets that append-only growth leaves
+    //  untouched.)
+    //
+    //  That case is the common one in the field, not a curiosity: the Doctor updates itself through
+    //  Velopack while Bloom versions linger on people's machines, and the planned 6.4 backport
+    //  guarantees more than one Bloom vintage writing this page at any given time.
+    //
+    //  The rule for a reader, when there is eventually more than one vintage to handle, is on the END of
+    //  the field and not its start — a field that begins inside the written region but runs past the end
+    //  of it must be treated as absent, not read half-way:
+    //
+    //        readable  <=>  fieldOffset + fieldSize <= snapshot.PayloadBytes
+    //
+    //  Nothing needs that yet, because every Bloom that writes generation 1 writes all of it. It is
+    //  written down, and PayloadBytes is recorded and surfaced on the snapshot, so that the day it is
+    //  needed the data is already there to work from.
+    // =================================================================================================
+
     // The layout. Offsets are explicit rather than computed so a change is visible in a diff.
     internal const int OffsetSchemaVersion = 0;
-    internal const int OffsetProcessId = 4;
+
+    /// <summary>
+    /// Where <see cref="PayloadBytes"/> itself lives. In the header, before anything that can grow,
+    /// because every reader of every future vintage has to be able to find it.
+    /// </summary>
+    internal const int OffsetPayloadBytes = 4;
 
     /// <summary>
     /// A sequence number, incremented before and after every write. Odd means a write is in progress.
     /// The reader takes it before and after reading and retries if it changed, which is what stops it
     /// seeing half of one update and half of the next — mattering most for the strings, since a torn
     /// activity name would be gibberish on a card.
+    ///
+    /// Deliberately 8-byte aligned, which is why the two ints above it come first and ProcessId moved
+    /// below it: an unaligned 64-bit read is not guaranteed to be atomic.
     /// </summary>
     internal const int OffsetWriteSequence = 8;
 
-    internal const int OffsetUiTicks = 16;
-    internal const int OffsetUiTimestamp = 24;
-    internal const int OffsetWatchdogTicks = 32;
-    internal const int OffsetWatchdogTimestamp = 40;
-    internal const int OffsetShutdownPhase = 48;
-    internal const int OffsetFlags = 52;
-    internal const int OffsetServerBusy = 56;
-    internal const int OffsetServerBlocked = 60;
-    internal const int OffsetActivity = 64;
+    internal const int OffsetProcessId = 16;
+    internal const int OffsetShutdownPhase = 20;
+    internal const int OffsetUiTicks = 24;
+    internal const int OffsetUiTimestamp = 32;
+    internal const int OffsetWatchdogTicks = 40;
+    internal const int OffsetWatchdogTimestamp = 48;
+    internal const int OffsetFlags = 56;
+    internal const int OffsetServerBusy = 60;
+    internal const int OffsetServerBlocked = 64;
+
+    /// <summary>
+    /// Four bytes nobody writes, so that the payload ENDS on an 8-byte boundary. Without it the next
+    /// field appended would start at 324 and a 64-bit one would be unaligned, which the writer above
+    /// explains is not safe to read atomically. Cheap now; awkward to retrofit, because fixing it later
+    /// would mean moving a field, which is a generation bump.
+    /// </summary>
+    internal const int OffsetReserved = 68;
+
+    internal const int OffsetActivity = 72;
+
+    /// <summary>
+    /// When a debugger was last detached, as <see cref="Environment.TickCount64"/>, or 0 if none ever has
+    /// been. Appended after the activity block, which is why the four reserved bytes above matter: this is
+    /// a 64-bit field and it lands 8-byte aligned.
+    /// </summary>
+    internal const int OffsetDebuggerLastDetached = 328;
 
     /// <summary>
     /// How much room the activity string gets. Public because it is part of the contract a caller has to
     /// respect: anything longer is truncated rather than allowed to run into the next field.
+    ///
+    /// Changing this number resizes an existing field, so it is a <see cref="SchemaVersion"/> bump and not
+    /// an additive change.
     /// </summary>
     public const int ActivityMaxBytes = 256;
+
+    /// <summary>
+    /// One past the last byte a writer of THIS build ever writes, recorded in the page so a reader can
+    /// tell how much of it is real. Grows as fields are appended; see the long note above.
+    /// </summary>
+    public const int PayloadBytes = OffsetDebuggerLastDetached + sizeof(long);
+
+    /// <summary>
+    /// The floor for generation 1: the least any writer of this generation provides, so a reader can read
+    /// everything up to here without checking whether it is present.
+    ///
+    /// It is raised to match <see cref="PayloadBytes"/> while generation 1 is **unreleased** — no Bloom has
+    /// shipped writing this page, so there is no older vintage to stay compatible with, and requiring the
+    /// whole layout is simpler and stricter than tolerating a shorter one nobody can produce.
+    ///
+    /// **It freezes the moment a Bloom ships writing this page.** After that, appending a field grows
+    /// PayloadBytes and leaves this alone, and a reader that wants the new field has to check for it — see
+    /// the note above. Raising it after release would make a newer Doctor reject every older Bloom.
+    /// </summary>
+    public const int BaselinePayloadBytes = PayloadBytes;
+
+    /// <summary>One field's position and extent, for the tests that pin the layout.</summary>
+    public readonly record struct FieldExtent(string Name, int Offset, int Size);
+
+    /// <summary>
+    /// Every field, in order. This exists so the layout can be *checked* rather than merely described:
+    /// the tests assert each offset by value, that no two fields overlap, that everything fits inside
+    /// <see cref="Size"/>, and that <see cref="PayloadBytes"/> really is the end of the last field — which
+    /// is what catches appending a field and forgetting to grow PayloadBytes.
+    /// </summary>
+    public static IReadOnlyList<FieldExtent> Fields { get; } =
+        new[]
+        {
+            new FieldExtent(nameof(SchemaVersion), OffsetSchemaVersion, sizeof(int)),
+            new FieldExtent(nameof(PayloadBytes), OffsetPayloadBytes, sizeof(int)),
+            new FieldExtent("WriteSequence", OffsetWriteSequence, sizeof(long)),
+            new FieldExtent("ProcessId", OffsetProcessId, sizeof(int)),
+            new FieldExtent("ShutdownPhase", OffsetShutdownPhase, sizeof(int)),
+            new FieldExtent("UiTicks", OffsetUiTicks, sizeof(long)),
+            new FieldExtent("UiTimestamp", OffsetUiTimestamp, sizeof(long)),
+            new FieldExtent("WatchdogTicks", OffsetWatchdogTicks, sizeof(long)),
+            new FieldExtent("WatchdogTimestamp", OffsetWatchdogTimestamp, sizeof(long)),
+            new FieldExtent("Flags", OffsetFlags, sizeof(int)),
+            new FieldExtent("ServerBusy", OffsetServerBusy, sizeof(int)),
+            new FieldExtent("ServerBlocked", OffsetServerBlocked, sizeof(int)),
+            new FieldExtent("Reserved", OffsetReserved, sizeof(int)),
+            new FieldExtent("Activity", OffsetActivity, ActivityMaxBytes),
+            new FieldExtent("DebuggerLastDetached", OffsetDebuggerLastDetached, sizeof(long)),
+        };
 
     internal const int FlagCleanExitRecorded = 1 << 0;
     internal const int FlagDebuggerAttached = 1 << 1;
     internal const int FlagLongOperation = 1 << 2;
+
+    /// <summary>
+    /// Set the first time a debugger is seen and never cleared. "Is a debugger attached right now" is not
+    /// the question worth answering: a developer who attaches, sits at a breakpoint for five minutes, and
+    /// detaches leaves a five-minute hole in the UI heartbeat and no debugger in sight, which is a freeze
+    /// report about nothing. Same for a process a debugger terminated — that is a TerminateProcess, so no
+    /// clean exit is recorded and it otherwise looks exactly like an unreported crash.
+    /// </summary>
+    internal const int FlagDebuggerEverAttached = 1 << 3;
 }
 
 /// <summary>
@@ -224,6 +379,23 @@ public static class DoctorChannelReader
         if (schema != DoctorChannelLayout.SchemaVersion)
             return null;
 
+        // How much of the page the writer filled in. Two things are being rejected here, and the first is
+        // the one that matters most: a section that has been CREATED but not yet initialised is
+        // zero-filled, so it would otherwise present itself as a settled, sane-looking page of zeroes.
+        // (The schema check above catches that too; this is the same guard on the field that will
+        // eventually be load-bearing.) The upper bound catches a value that cannot be true of any writer.
+        //
+        // Note it is compared against the BASELINE and not against our own PayloadBytes: a Doctor built
+        // against a later, larger layout must still accept an older Bloom that wrote less. Requiring our
+        // own extent here would throw away the whole page for the sake of one field we happen to know
+        // about and it does not.
+        var payloadBytes = view.ReadInt32(DoctorChannelLayout.OffsetPayloadBytes);
+        if (
+            payloadBytes < DoctorChannelLayout.BaselinePayloadBytes
+            || payloadBytes > DoctorChannelLayout.Size
+        )
+            return null;
+
         var now = Environment.TickCount64;
         var flags = view.ReadInt32(DoctorChannelLayout.OffsetFlags);
         var activityBytes = new byte[DoctorChannelLayout.ActivityMaxBytes];
@@ -232,6 +404,7 @@ public static class DoctorChannelReader
         return new DoctorChannelSnapshot
         {
             SchemaVersion = schema,
+            PayloadBytes = payloadBytes,
             ProcessId = view.ReadInt32(DoctorChannelLayout.OffsetProcessId),
             UiTicks = view.ReadInt64(DoctorChannelLayout.OffsetUiTicks),
             // Both sides use Environment.TickCount64, which counts since the machine booted and is
@@ -247,6 +420,11 @@ public static class DoctorChannelReader
             ShutdownPhase = view.ReadInt32(DoctorChannelLayout.OffsetShutdownPhase),
             CleanExitRecorded = (flags & DoctorChannelLayout.FlagCleanExitRecorded) != 0,
             DebuggerAttached = (flags & DoctorChannelLayout.FlagDebuggerAttached) != 0,
+            DebuggerEverAttached = (flags & DoctorChannelLayout.FlagDebuggerEverAttached) != 0,
+            DebuggerLastDetachedAge = AgeOf(
+                view.ReadInt64(DoctorChannelLayout.OffsetDebuggerLastDetached),
+                now
+            ),
             LongOperationInProgress = (flags & DoctorChannelLayout.FlagLongOperation) != 0,
             ServerBusyWorkers = view.ReadInt32(DoctorChannelLayout.OffsetServerBusy),
             ServerBlockedWorkers = view.ReadInt32(DoctorChannelLayout.OffsetServerBlocked),
@@ -314,6 +492,9 @@ public sealed class DoctorChannelWriter : IDisposable
             );
             _view = _file.CreateViewAccessor(0, DoctorChannelLayout.Size, MemoryMappedFileAccess.ReadWrite);
             _view.Write(DoctorChannelLayout.OffsetSchemaVersion, DoctorChannelLayout.SchemaVersion);
+            // How far this build writes, so a future reader can tell what is really here rather than
+            // reading zero-filled space as data. Written once, at creation, and never changed.
+            _view.Write(DoctorChannelLayout.OffsetPayloadBytes, DoctorChannelLayout.PayloadBytes);
             _view.Write(DoctorChannelLayout.OffsetProcessId, processId);
         }
         catch (Exception)
@@ -372,9 +553,45 @@ public sealed class DoctorChannelWriter : IDisposable
     /// <summary>Marks a deliberately long operation, which buys Bloom patience rather than silence.</summary>
     public void SetLongOperation(bool inProgress) => SetFlag(DoctorChannelLayout.FlagLongOperation, inProgress);
 
-    /// <summary>Publishes whether a debugger is attached, which is authoritative and stops false reports.</summary>
+    /// <summary>
+    /// Publishes whether a debugger is attached, which is authoritative and stops false reports.
+    ///
+    /// This method REMEMBERS, which is the point of it: the first attach also sets a sticky "ever attached"
+    /// flag that is never cleared, and a detach records when it happened. Call it repeatedly — it detects the
+    /// transitions by comparing against what is already in the page, so the caller does not have to track any
+    /// state of its own.
+    ///
+    /// Why remembering matters: a debugger that has come and gone leaves behind precisely the evidence of a
+    /// freeze (a long hole in the UI heartbeat) or of a crash (no clean exit, because terminating from a
+    /// debugger is a TerminateProcess), with nothing still attached to account for it.
+    /// </summary>
     public void SetDebuggerAttached(bool attached) =>
-        SetFlag(DoctorChannelLayout.FlagDebuggerAttached, attached);
+        Write(view =>
+        {
+            var flags = view.ReadInt32(DoctorChannelLayout.OffsetFlags);
+            var wasAttached = (flags & DoctorChannelLayout.FlagDebuggerAttached) != 0;
+
+            if (attached)
+            {
+                flags |=
+                    DoctorChannelLayout.FlagDebuggerAttached
+                    | DoctorChannelLayout.FlagDebuggerEverAttached;
+            }
+            else
+            {
+                flags &= ~DoctorChannelLayout.FlagDebuggerAttached;
+                // Only on the transition. Writing it every time we are called with false would keep moving
+                // the timestamp forward for a run that never had a debugger at all, and "last detached: one
+                // second ago" would then excuse every freeze there ever was.
+                if (wasAttached)
+                    view.Write(
+                        DoctorChannelLayout.OffsetDebuggerLastDetached,
+                        Environment.TickCount64
+                    );
+            }
+
+            view.Write(DoctorChannelLayout.OffsetFlags, flags);
+        });
 
     /// <summary>Records how far shutdown has got.</summary>
     public void SetShutdownPhase(int phase) =>

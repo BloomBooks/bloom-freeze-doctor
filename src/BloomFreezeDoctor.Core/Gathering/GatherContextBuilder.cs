@@ -1,5 +1,9 @@
 using System.Diagnostics;
 
+// Aliased rather than imported plainly, so uses below still read as Protocol.DoctorSession - it is worth
+// saying at each use that this is the shared wire format, not something local to the Doctor.
+using Protocol = BloomBooks.FreezeDoctor.Protocol;
+
 namespace BloomFreezeDoctor.Gathering;
 
 /// <summary>
@@ -27,7 +31,7 @@ public static class GatherContextBuilder
         // Bloom's own session file, when there is one, is better than anything we can work out from
         // outside — and for the log path it is better in a way that matters: guessing from the filesystem
         // is systematically wrong in the restart-after-a-freeze case (see BloomLogLocator).
-        var session = Contract.DoctorSessionStore.TryRead(target.ProcessId);
+        var session = Protocol.DoctorSessionStore.TryRead(target.ProcessId);
 
         return new GatherContext
         {
@@ -47,11 +51,11 @@ public static class GatherContextBuilder
     /// the watcher so that the report quotes the state at the moment we decided to gather, which is the
     /// moment a reader will be asking about.
     /// </summary>
-    private static Contract.DoctorChannelSnapshot? ReadPublishedState(int processId)
+    private static Protocol.DoctorChannelSnapshot? ReadPublishedState(int processId)
     {
         try
         {
-            return Contract.DoctorChannelReader.TryRead(processId, out var snapshot) ? snapshot : null;
+            return Protocol.DoctorChannelReader.TryRead(processId, out var snapshot) ? snapshot : null;
         }
         catch (Exception)
         {

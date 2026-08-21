@@ -158,7 +158,7 @@ public class ExitClassifierTests
                 HasEventLogCrashEntry = true,
                 HasWerReport = true,
                 CleanExitProofPresent = false,
-                EverDebugged = true,
+                DebuggerCouldExplainIt = true,
             },
             Phase3
         );

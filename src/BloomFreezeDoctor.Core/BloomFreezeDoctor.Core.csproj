@@ -16,6 +16,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!--
+      The wire format Bloom and the Doctor share. Its own project because it is also published as its
+      own package, which is how BloomDesktop gets it instead of keeping a copy.
+    -->
+    <ProjectReference Include="..\BloomBooks.FreezeDoctor.Protocol\BloomBooks.FreezeDoctor.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Reading the Windows Event Log for crash and unexpected-shutdown entries (plan 4.4). -->
     <PackageReference Include="System.Diagnostics.EventLog" Version="8.0.1" />
     <!-- Reading another process's command line, to spot automation runs and the WebView2 debug port. -->

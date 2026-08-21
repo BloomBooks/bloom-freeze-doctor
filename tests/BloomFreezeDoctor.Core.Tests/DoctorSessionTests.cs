@@ -1,4 +1,4 @@
-using BloomFreezeDoctor.Contract;
+using BloomBooks.FreezeDoctor.Protocol;
 using NUnit.Framework;
 
 namespace BloomFreezeDoctor.Tests;
