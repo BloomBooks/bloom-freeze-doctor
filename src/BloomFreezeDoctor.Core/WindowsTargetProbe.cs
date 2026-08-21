@@ -34,6 +34,16 @@ public sealed class WindowsTargetProbe : ITargetProbe
     /// </summary>
     private bool _everDebugged;
 
+    /// <summary>
+    /// The last debugger state Bloom published, remembered because a process that has died can no longer be
+    /// asked and its shared page may already have gone with it.
+    ///
+    /// It is what covers a debugger *terminating* Bloom: that is a TerminateProcess, so Bloom never gets to
+    /// record a detach, and the last thing it published still says a debugger was attached.
+    /// </summary>
+    private bool _debuggerAttachedWhenLastSeen;
+    private TimeSpan? _debuggerLastDetachedAge;
+
     /// <summary>Creates a probe for an already-opened process handle.</summary>
     public WindowsTargetProbe(Process process)
     {
@@ -124,7 +134,11 @@ public sealed class WindowsTargetProbe : ITargetProbe
                 IsAlive = false,
                 WindowResponds = false,
                 HasVisibleWindow = false,
-                DebuggerAttached = _everDebugged,
+                // The last thing Bloom managed to publish, not a fresh reading: there is nothing left to
+                // read. A debugger still attached at that point is very likely what ended it.
+                DebuggerAttachedNow = _debuggerAttachedWhenLastSeen,
+                DebuggerEverAttached = _everDebugged,
+                DebuggerLastDetachedAge = _debuggerLastDetachedAge,
             };
 
         SampleDebugger();
@@ -139,9 +153,12 @@ public sealed class WindowsTargetProbe : ITargetProbe
             IsAlive = true,
             WindowResponds = responds,
             HasVisibleWindow = window != IntPtr.Zero,
-            // Bloom's own answer wins over our guess when we have it: it is authoritative, and it is why
-            // a developer stopping their debugger never produces a report.
-            DebuggerAttached = _everDebugged,
+            // Bloom's own answer wins over our guess when we have it: it is authoritative, it covers the
+            // whole run rather than only the part we have been watching, and it sees a NATIVE debugger,
+            // which `Debugger.IsAttached` alone does not.
+            DebuggerAttachedNow = _debuggerAttachedWhenLastSeen,
+            DebuggerEverAttached = _everDebugged,
+            DebuggerLastDetachedAge = _debuggerLastDetachedAge,
             HeartbeatIsStale = published.HeartbeatIsStale,
             UiBlockCorroborated = published.UiBlockCorroborated,
             LongOperationInProgress = published.LongOperation,
@@ -171,8 +188,14 @@ public sealed class WindowsTargetProbe : ITargetProbe
         }
         PublishedSnapshot = snapshot;
 
-        if (snapshot.DebuggerAttached)
+        // Bloom's sticky flag is better than our latch in two ways: it covers the whole run, including
+        // before the Doctor started watching this Bloom, and it sees a native debugger as well as a managed
+        // one. The departure time is what keeps "ever attached" from writing off the rest of the run.
+        _debuggerAttachedWhenLastSeen = snapshot.DebuggerAttached;
+        if (snapshot.DebuggerAttached || snapshot.DebuggerEverAttached)
             _everDebugged = true;
+        if (snapshot.DebuggerLastDetachedAge != TimeSpan.MaxValue)
+            _debuggerLastDetachedAge = snapshot.DebuggerLastDetachedAge;
 
         var uiStale = snapshot.UiHeartbeatAge > StaleHeartbeatThreshold;
 

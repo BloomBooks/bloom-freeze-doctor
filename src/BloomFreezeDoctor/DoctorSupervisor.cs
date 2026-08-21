@@ -498,7 +498,7 @@ public sealed class DoctorSupervisor : IDisposable
                     State = verdict.State,
                     ReportGathered = true,
                     SinceDetected = DateTimeOffset.UtcNow - watcher.ZombieSince.Value,
-                    EverDebugged = watcher.IsPoisonedByDebugger,
+                    DebuggerCouldExplainIt = watcher.IsPoisonedByDebugger,
                     WorkInProgress = LooksLikeWorkInProgress(watcher.Target.ProcessId),
                     DisabledBySetting = _neverEndZombies,
                 }

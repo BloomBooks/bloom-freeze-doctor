@@ -15,8 +15,11 @@ public readonly record struct ZombieDecisionFacts
     /// <summary>How long since we decided it was a zombie.</summary>
     public required TimeSpan SinceDetected { get; init; }
 
-    /// <summary>True if this target has ever been seen under a debugger.</summary>
-    public required bool EverDebugged { get; init; }
+    /// <summary>
+    /// True if a debugger can account for the state this process is in — one is attached, or left too
+    /// recently to rule out. Killing a process somebody may be debugging is not ours to do.
+    /// </summary>
+    public required bool DebuggerCouldExplainIt { get; init; }
 
     /// <summary>
     /// True if Bloom says it is in the middle of a long operation, or its activity mentions saving or
@@ -78,8 +81,8 @@ public static class ZombieEnder
                     + "may be holding edits that have not yet reached C#, so we never kill one"
             );
 
-        if (facts.EverDebugged)
-            return No("this Bloom has been under a debugger, so it is not ours to end");
+        if (facts.DebuggerCouldExplainIt)
+            return No("a debugger is or was just attached to this Bloom, so it is not ours to end");
 
         if (!facts.ReportGathered)
             return No("the evidence has not been gathered yet, and killing it first would destroy it");

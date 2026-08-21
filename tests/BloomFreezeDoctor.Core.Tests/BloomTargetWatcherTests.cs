@@ -29,7 +29,10 @@ public class BloomTargetWatcherTests
                 IsAlive = Alive,
                 WindowResponds = Responds,
                 HasVisibleWindow = HasVisibleWindow,
-                DebuggerAttached = DebuggerAttached,
+                // No departure time, so this stands for the conservative case: a debugger was seen and we
+                // cannot tell when it left, which poisons the target exactly as it always did.
+                DebuggerAttachedNow = DebuggerAttached,
+                DebuggerEverAttached = DebuggerAttached,
             };
     }
 

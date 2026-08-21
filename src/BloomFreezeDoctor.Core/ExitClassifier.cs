@@ -43,8 +43,13 @@ public sealed record ExitEvidence
     /// </summary>
     public bool MachineWentDown { get; init; }
 
-    /// <summary>The target had been seen under a debugger at some point in its life.</summary>
-    public bool EverDebugged { get; init; }
+    /// <summary>
+    /// A debugger can account for this exit — one was attached when the process died, or left too recently
+    /// to be ruled out. **Not** merely "was debugged at some point in its life": a debugger detached hours
+    /// earlier does not explain a crash now, and treating it as though it did meant a developer's machine
+    /// never reported anything again for the rest of the run.
+    /// </summary>
+    public bool DebuggerCouldExplainIt { get; init; }
 
     /// <summary>A developer or automation run, which is never filed whatever else is true.</summary>
     public bool NeverFile { get; init; }
@@ -140,11 +145,11 @@ public static class ExitClassifier
                 "the machine shut down unexpectedly while Bloom was running, which explains the missing shutdown"
             );
 
-        if (evidence.EverDebugged)
+        if (evidence.DebuggerCouldExplainIt)
             return Conclude(
                 ExitVerdict.NoOrderlyShutdown,
                 false,
-                "this Bloom had been under a debugger, so its exit tells us nothing"
+                "a debugger was attached to this Bloom around the time it went, so its exit tells us nothing"
             );
 
         // NOTE what is deliberately NOT here: a check on NeverFile. Whether a report may be *filed* is a
